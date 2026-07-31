@@ -10,6 +10,12 @@ Routes (mounted at /api/annotate)
   GET  /page/<name>/<n>?day_id= server-rendered JPEG of one PDF page
   GET  /stats                  aggregate metrics for the dashboard
   POST /save                   persist GT JSON + run eval -> evaluation_results
+
+  Manual (parse-failed files, rendered from inbox/, NEVER scored):
+  GET  /manual/worklist?day_id=   files with status='manual'
+  GET  /manual/file/<name>?day_id= page count (inbox PDF) + existing GT
+  GET  /manual/page/<name>/<n>?day_id= server-rendered JPEG from the inbox PDF
+  POST /manual/save               GT JSON + split_results row (deliverable, no eval)
 """
 from __future__ import annotations
 
@@ -17,7 +23,7 @@ from flask import Blueprint, Response, current_app, jsonify, request
 
 from ..core.auth import actor
 from ..core.http import day_id_arg, valid_name
-from . import annotation
+from . import annotation, manual
 
 bp = Blueprint("annotate", __name__, url_prefix="/api/annotate")
 
@@ -130,4 +136,96 @@ def save():
         })
     except Exception as e:  # noqa: BLE001
         current_app.logger.exception("save failed")
+        return jsonify({"error": str(e)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Manual annotation — parse-failed files (status='manual'), rendered from inbox/.
+#  Makes them deliverable via a split_results row, but NEVER scored.
+# ─────────────────────────────────────────────────────────────────────────────
+@bp.get("/manual/worklist")
+def manual_worklist():
+    day = day_id_arg()
+    if not day:
+        return jsonify({"error": "day_id query parameter required"}), 400
+    try:
+        return jsonify(manual.build_worklist(day))
+    except Exception as e:  # noqa: BLE001
+        current_app.logger.exception("manual worklist failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.get("/manual/file/<name>")
+def manual_file_detail(name: str):
+    day = day_id_arg()
+    if not valid_name(name):
+        return jsonify({"error": "invalid filename"}), 400
+    if not day:
+        return jsonify({"error": "day_id query parameter required"}), 400
+    try:
+        gt = annotation.load_ground_truth(day, name)
+        return jsonify({
+            "filename": name,
+            "day_id": day,
+            "total_pages": manual.page_count(day, name),
+            "folder_id": name.split("_")[0],
+            "ground_truth": gt,
+        })
+    except Exception as e:  # noqa: BLE001
+        current_app.logger.exception("manual file_detail failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.get("/manual/page/<name>/<int:n>")
+def manual_page_image(name: str, n: int):
+    day = day_id_arg()
+    if not valid_name(name):
+        return jsonify({"error": "invalid filename"}), 400
+    if not day:
+        return jsonify({"error": "day_id query parameter required"}), 400
+    try:
+        if n < 1 or n > manual.page_count(day, name):
+            return jsonify({"error": "page out of range"}), 404
+        jpeg = manual.render_page_jpeg(day, name, n)
+        resp = Response(jpeg, mimetype="image/jpeg")
+        resp.headers["Cache-Control"] = "public, max-age=3600"
+        return resp
+    except Exception as e:  # noqa: BLE001
+        current_app.logger.exception("manual page_image failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.post("/manual/save")
+def manual_save():
+    body = request.get_json(silent=True) or {}
+    name = body.get("filename", "")
+    day = (body.get("day_id") or "").strip()
+    if not valid_name(name):
+        return jsonify({"error": "invalid filename"}), 400
+    if not valid_name(day):
+        return jsonify({"error": "day_id required in body"}), 400
+
+    starts = body.get("predicted_starts")
+    is_multidoc = bool(body.get("is_multidoc", False))
+    if not isinstance(starts, list) or not starts:
+        return jsonify({"error": "predicted_starts must be a non-empty list"}), 400
+
+    try:
+        total_pages = int(body.get("total_pages") or 0)
+        if total_pages <= 0:
+            return jsonify({"error": "total_pages missing or invalid"}), 400
+        folder_id = body.get("folder_id") or name.split("_")[0]
+
+        res = manual.save_manual(
+            day_id=day,
+            filename=name,
+            starts=[int(x) for x in starts],
+            is_multidoc=is_multidoc,
+            total_pages=total_pages,
+            folder_id=folder_id,
+            annotator=actor(),
+        )
+        return jsonify(res)
+    except Exception as e:  # noqa: BLE001
+        current_app.logger.exception("manual save failed")
         return jsonify({"error": str(e)}), 500

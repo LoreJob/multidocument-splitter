@@ -89,13 +89,16 @@ _DOC_CACHE: "OrderedDict[str, fitz.Document]" = OrderedDict()
 _DOC_CACHE_MAX = 4       # keep the last few PDFs open (bytes can be large)
 
 
-def _get_doc(day_id: str, filename: str) -> fitz.Document:
-    key = f"{day_id}/{filename}"
+def _get_doc(day_id: str, filename: str, base_path: str | None = None) -> fitz.Document:
+    # base_path defaults to validation/ (the sample). Manual annotation passes
+    # inbox/ so parse-failed files (never staged into validation/) can be rendered.
+    base = base_path or config.validation_path(day_id)
+    key = f"{base}/{filename}"
     if key in _DOC_CACHE:
         _DOC_CACHE.move_to_end(key)
         return _DOC_CACHE[key]
     vols = get_volumes()
-    data = vols.download_bytes(vols.pdf_path(config.validation_path(day_id), filename))
+    data = vols.download_bytes(vols.pdf_path(base, filename))
     doc = fitz.open(stream=data, filetype="pdf")
     _DOC_CACHE[key] = doc
     if len(_DOC_CACHE) > _DOC_CACHE_MAX:
@@ -107,13 +110,13 @@ def _get_doc(day_id: str, filename: str) -> fitz.Document:
     return doc
 
 
-def page_count(day_id: str, filename: str) -> int:
-    return _get_doc(day_id, filename).page_count
+def page_count(day_id: str, filename: str, base_path: str | None = None) -> int:
+    return _get_doc(day_id, filename, base_path).page_count
 
 
-def render_page_jpeg(day_id: str, filename: str, n: int) -> bytes:
+def render_page_jpeg(day_id: str, filename: str, n: int, base_path: str | None = None) -> bytes:
     """Render 1-based page `n` to an RGB JPEG (csRGB avoids CMYK/colorspace glitches)."""
-    page = _get_doc(day_id, filename).load_page(n - 1)
+    page = _get_doc(day_id, filename, base_path).load_page(n - 1)
     pix = page.get_pixmap(matrix=fitz.Matrix(PAGE_ZOOM, PAGE_ZOOM),
                           colorspace=fitz.csRGB, alpha=False)
     return pix.tobytes("jpeg", jpg_quality=JPEG_QUALITY)

@@ -104,6 +104,14 @@ def mark_manual(day_id: str, filename: str) -> str:
     return "marked manual"
 
 
+def mark_manual_bulk(day_id: str, filenames: list[str]) -> int:
+    """Mark several files manual in one call. Reuses mark_manual so each file
+    keeps its own 'marked_manual' event. Returns the number of files targeted."""
+    for f in filenames:
+        mark_manual(day_id, f)
+    return len(filenames)
+
+
 def approve_review(day_id: str, filename: str) -> str:
     """Approve an unsplit [1]-fallback for delivery as-is."""
     sql = get_sql()

@@ -18,6 +18,7 @@ Routes (mounted at /api)
   POST /run-ingest         {day_id, sample_pct} → jobs.run_now(job_ingest)
   POST /run-deliver        {day_id, sftp_remote_base} → job_deliver (gate-guarded)
   POST /redeliver          {day_id, filenames?, sftp_remote_base} → deferred → pending
+  POST /mark-manual        {day_id, filenames} → bulk mark several files manual
   POST /action/<type>      retry-parse / retry-split / retry-sftp / mark-manual / approve-review
   GET  /health             liveness probe
 """
@@ -261,6 +262,25 @@ def redeliver():
         return jsonify({"launched": True, "reset": n if n >= 0 else "all", **res})
     except Exception as e:  # noqa: BLE001
         current_app.logger.exception("redeliver failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.post("/mark-manual")
+def mark_manual_bulk():
+    if not auth.can_operate():
+        return _forbidden()
+    body = request.get_json(silent=True) or {}
+    day = (body.get("day_id") or "").strip()
+    filenames = body.get("filenames")
+    if not valid_name(day):
+        return jsonify({"error": "invalid day_id"}), 400
+    if not isinstance(filenames, list) or not filenames or not all(valid_name(f) for f in filenames):
+        return jsonify({"error": "filenames must be a non-empty list of valid names"}), 400
+    try:
+        n = actions.mark_manual_bulk(day, filenames)
+        return jsonify({"done": True, "count": n, "message": f"marked {n} manual"})
+    except Exception as e:  # noqa: BLE001
+        current_app.logger.exception("mark-manual bulk failed")
         return jsonify({"error": str(e)}), 500
 
 

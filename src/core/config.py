@@ -73,6 +73,10 @@ class Config:
         return f"{base}/{day_id}" if day_id else base
 
     @classmethod
+    def inbox_path(cls, day_id: str | None = None) -> str:
+        return cls.volume_path(cls.INBOX_VOLUME, day_id)
+
+    @classmethod
     def validation_path(cls, day_id: str | None = None) -> str:
         return cls.volume_path(cls.VALIDATION_VOLUME, day_id)
 

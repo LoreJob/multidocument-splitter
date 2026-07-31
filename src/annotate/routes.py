@@ -51,10 +51,12 @@ def file_detail(name: str):
         # Operator-blind: never return the model prediction. total_pages comes from
         # the PDF itself; existing GT (if any) is returned for re-annotation.
         gt = annotation.load_ground_truth(day, name)
+        total_pages = annotation.page_count(day, name)
+        annotation.prewarm(day, name, total_pages)  # background: pages ready before scroll
         return jsonify({
             "filename": name,
             "day_id": day,
-            "total_pages": annotation.page_count(day, name),
+            "total_pages": total_pages,
             "folder_id": name.split("_")[0],
             "ground_truth": gt,
         })
@@ -164,10 +166,12 @@ def manual_file_detail(name: str):
         return jsonify({"error": "day_id query parameter required"}), 400
     try:
         gt = annotation.load_ground_truth(day, name)
+        total_pages = manual.page_count(day, name)
+        manual.prewarm(day, name, total_pages)  # background: render inbox pages ahead
         return jsonify({
             "filename": name,
             "day_id": day,
-            "total_pages": manual.page_count(day, name),
+            "total_pages": total_pages,
             "folder_id": name.split("_")[0],
             "ground_truth": gt,
         })

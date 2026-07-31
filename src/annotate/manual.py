@@ -66,6 +66,10 @@ def render_page_jpeg(day_id: str, filename: str, n: int) -> bytes:
     return annotation.render_page_jpeg(day_id, filename, n, config.inbox_path(day_id))
 
 
+def prewarm(day_id: str, filename: str, total_pages: int) -> None:
+    annotation.prewarm(day_id, filename, total_pages, config.inbox_path(day_id))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Save — GT JSON + split_results row, NO evaluation (metrics untouched)
 # ─────────────────────────────────────────────────────────────────────────────

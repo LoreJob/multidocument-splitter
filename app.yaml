@@ -51,7 +51,7 @@ env:
   # otherwise events are attributed to the container's OS username, which looks
   # plausible enough that nobody questions it.
   - name: DASHBOARD_ACTOR
-    value: "REPLACE_WITH_OWNER_EMAIL"
+    value: "lorenzo.muscillo@luxottica.com"
 
   # Restrict who may launch jobs / mutate pipeline state (comma-separated emails).
   # Empty = everyone. Requires flipping the one-line body of core/auth.can_operate().

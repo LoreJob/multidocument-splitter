@@ -19,14 +19,17 @@ const Annotate = (() => {
     starts: new Set([1]),   // ground-truth boundaries (doc start pages)
     dirty: false,
     loadedDay: null,        // which batch the current worklist belongs to
+    mode: "sample",         // "sample" = scored sample | "manual" = parse-failed, not scored
   };
 
   let pageObserver = null;  // IntersectionObserver for lazy image loading
 
   // Every annotate URL goes through this. Building one by hand risks hitting the
   // pipeline's /api/file/<name>, which answers 200 with a different shape — the
-  // viewer would render blank with no error anywhere.
-  const A = (path) => `/api/annotate${path}`;
+  // viewer would render blank with no error anywhere. In manual mode it targets
+  // the /manual/* siblings, which mirror the sample routes exactly.
+  const A = (path) => `/api/annotate${ann.mode === "manual" ? "/manual" : ""}${path}`;
+  const saveLabel = () => (ann.mode === "manual" ? "Save (manual)" : "Save & Evaluate");
 
   // ── Worklist ──────────────────────────────────────────────────────────────
   async function loadWorklist(selectFirst = false) {
@@ -55,8 +58,9 @@ const Annotate = (() => {
     renderList($("ann-completed"), wl.completed || [], true);
 
     if (!wl.n_total) {
-      $("ann-empty").innerHTML =
-        "<p>No annotation sample for this batch yet — run ingest first.</p>";
+      $("ann-empty").innerHTML = ann.mode === "manual"
+        ? "<p>No files marked manual for this batch. Mark parse-failed files manual in the Errors tab first.</p>"
+        : "<p>No annotation sample for this batch yet — run ingest first.</p>";
     }
     if (selectFirst && (wl.pending || []).length) loadFile(wl.pending[0]);
   }
@@ -228,12 +232,17 @@ const Annotate = (() => {
       is_multidoc: $("ann-multidoc").checked,
     });
 
-    btn.textContent = "Save & Evaluate";
+    btn.textContent = saveLabel();
     btn.disabled = false;
     if (res.error) return toast(`Save failed: ${res.error}`, true);
 
     ann.dirty = false;
-    showEval(res.evaluation);
+    if (ann.mode === "manual") {
+      // Manual files are never scored — no eval dialog, just confirm + move on.
+      toast("Saved — manual boundaries stored (not scored). File is now deliverable.");
+    } else {
+      showEval(res.evaluation);
+    }
     loadWorklist();
     // The gate reads the same ground_truth/ volume this just wrote to, so the
     // batch list's lifecycle and gate counter are now stale.
@@ -280,9 +289,31 @@ const Annotate = (() => {
     syncControls();
   }
 
+  // ── Mode: scored sample ⇄ manual (parse-failed, not scored) ───────────────
+  function updateModeUI() {
+    const s = $("ann-mode-sample");
+    const m = $("ann-mode-manual");
+    if (s) s.classList.toggle("active", ann.mode === "sample");
+    if (m) m.classList.toggle("active", ann.mode === "manual");
+    const banner = $("ann-manual-banner");
+    if (banner) banner.classList.toggle("hidden", ann.mode !== "manual");
+    const save = $("ann-save");
+    if (save && !save.disabled) save.textContent = saveLabel();
+  }
+
+  function setMode(mode) {
+    if (mode === ann.mode) return;
+    if (ann.dirty && !confirm("Unsaved annotation. Discard your marks?")) return;
+    ann.mode = mode;
+    onDayChange();        // drop the open file — the two lists are disjoint
+    updateModeUI();
+    loadWorklist();
+  }
+
   // ── Tab lifecycle ─────────────────────────────────────────────────────────
   function enter() {
     $("ann-day").textContent = state.dayId || "";
+    updateModeUI();
     if (state.dayId && state.dayId !== ann.loadedDay) onDayChange();
     loadWorklist();
     // leave() drops the rendered pages; rebuild them for the file still open.
@@ -321,6 +352,8 @@ const Annotate = (() => {
   $("ann-save").onclick = save;
   $("ann-reset").onclick = resetStarts;
   $("ann-multidoc").onchange = () => { ann.dirty = true; };
+  $("ann-mode-sample").onclick = () => setMode("sample");
+  $("ann-mode-manual").onclick = () => setMode("manual");
   $("dlg-eval-next").onclick = () => {
     $("dlg-eval").close();
     loadWorklist(true);

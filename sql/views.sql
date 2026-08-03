@@ -67,6 +67,12 @@ SELECT
   SUM(CASE WHEN status = 'error'    THEN 1 ELSE 0 END)              AS n_error,
   SUM(CASE WHEN status = 'skipped'  THEN 1 ELSE 0 END)              AS n_skipped,
   SUM(CASE WHEN status = 'manual'   THEN 1 ELSE 0 END)              AS n_manual,
+  -- 'manual' vale due cose: annotato a mano nel tab Manual (boundary_source
+  -- ='manual' → consegnabile come ogni altro file) e marcato manual dal tab
+  -- Errors (gestito fuori dalla pipeline, mai consegnato). Solo il secondo va
+  -- escluso dal denominatore di 'delivered' in v_batch_status.
+  SUM(CASE WHEN status = 'manual' AND boundary_source = 'manual'
+           THEN 1 ELSE 0 END)                                       AS n_manual_deliverable,
   SUM(CASE WHEN sftp_delivery_status = 'pending'   THEN 1 ELSE 0 END) AS n_sftp_pending,
   SUM(CASE WHEN sftp_delivery_status = 'delivered' THEN 1 ELSE 0 END) AS n_delivered,
   SUM(CASE WHEN sftp_delivery_status = 'failed'    THEN 1 ELSE 0 END) AS n_sftp_failed,
@@ -86,7 +92,8 @@ SELECT
   g.gate_opened,
   CASE
     WHEN f.n_delivered > 0
-         AND f.n_delivered >= (f.n_files - f.n_skipped - f.n_manual - f.n_error)
+         AND f.n_delivered >= (f.n_files - f.n_skipped
+                               - (f.n_manual - f.n_manual_deliverable) - f.n_error)
       THEN 'delivered'
     WHEN f.n_sftp_pending + f.n_sftp_failed + f.n_deferred > 0
       THEN 'delivering'

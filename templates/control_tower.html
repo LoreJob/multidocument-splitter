@@ -72,6 +72,16 @@
           <a href="/dashboard" class="btn tiny ghost" target="_blank">📊 Dashboard</a>
         </div>
 
+        <div class="ann-modebar">
+          <div class="seg">
+            <button id="ann-mode-sample" class="seg-btn active">Annotation</button>
+            <button id="ann-mode-manual" class="seg-btn">Manual</button>
+          </div>
+          <div id="ann-manual-banner" class="manual-banner hidden">
+            ✋ Manual mode — parse-failed files, rendered from the raw PDF. Boundaries here are <b>not scored</b> and make the file deliverable.
+          </div>
+        </div>
+
         <div id="ann-nobatch" class="loading hidden">No batch selected.</div>
 
         <div id="ann-body" class="ann-body">

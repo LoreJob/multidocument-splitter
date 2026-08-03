@@ -5,9 +5,14 @@ evaluation logic into the operations the Flask routes call.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import tempfile
+import threading
 from collections import OrderedDict
 from datetime import datetime, timezone
+from pathlib import Path
 
 import fitz  # PyMuPDF — server-side page rendering
 
@@ -81,42 +86,174 @@ def get_model_prediction(filename: str, day_id: str | None = None) -> dict | Non
 # ─────────────────────────────────────────────────────────────────────────────
 PAGE_ZOOM = 1.6          # ~115 DPI
 JPEG_QUALITY = 80
-# Cached per worker process, so resident memory is _DOC_CACHE_MAX × workers.
-# NOT thread-safe: fitz.Document isn't, and there is no lock here. Safe under
-# gunicorn's sync workers (one request per worker at a time) — adding --threads
-# would need a render lock around _get_doc/render_page_jpeg first.
+
+# Rendering is expensive twice over: the PDF is downloaded from the Volume and
+# every page is rasterised. Two caches sit in front of it:
+#   * _DOC_CACHE — open fitz.Document per worker (avoids re-download while a file
+#     is open). Small, in-process.
+#   * a shared on-disk JPEG cache — each rendered page is written once and served
+#     by ANY of the gunicorn workers (they share the container filesystem), so a
+#     page is rasterised once ever, not per session / per worker / per tab.
+# _RENDER_LOCK makes both safe when a background pre-warm thread renders while a
+# request thread also renders. It is an RLock because render_page_jpeg holds it
+# and calls _get_doc, which acquires it too. Disk-cache HITS never take the lock.
+_RENDER_LOCK = threading.RLock()
+
 _DOC_CACHE: "OrderedDict[str, fitz.Document]" = OrderedDict()
 _DOC_CACHE_MAX = 4       # keep the last few PDFs open (bytes can be large)
 
+# Shared page-image cache on the container filesystem.
+_CACHE_DIR = Path(os.environ.get("RENDER_CACHE_DIR")
+                  or (Path(tempfile.gettempdir()) / "gt-render-cache"))
+_CACHE_MAX_MB = int(os.environ.get("RENDER_CACHE_MAX_MB", "512"))
+_PREWARM_ON = os.environ.get("RENDER_PREWARM", "1") != "0"
+try:
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass  # unwritable cache dir → we degrade to render-without-cache below
 
-def _get_doc(day_id: str, filename: str) -> fitz.Document:
-    key = f"{day_id}/{filename}"
-    if key in _DOC_CACHE:
-        _DOC_CACHE.move_to_end(key)
-        return _DOC_CACHE[key]
-    vols = get_volumes()
-    data = vols.download_bytes(vols.pdf_path(config.validation_path(day_id), filename))
-    doc = fitz.open(stream=data, filetype="pdf")
-    _DOC_CACHE[key] = doc
-    if len(_DOC_CACHE) > _DOC_CACHE_MAX:
-        _, old = _DOC_CACHE.popitem(last=False)
-        try:
-            old.close()
-        except Exception:
+_WARMING: set[str] = set()   # cache-bases currently being pre-warmed
+_WARMING_LOCK = threading.Lock()
+_EVICT_EVERY = 200           # sweep the cache only once every N writes
+_write_count = 0
+
+
+def _base_for(day_id: str, base_path: str | None) -> str:
+    # base_path defaults to validation/ (the sample). Manual annotation passes
+    # inbox/ so parse-failed files (never staged into validation/) can be rendered.
+    return base_path or config.validation_path(day_id)
+
+
+def _get_doc(day_id: str, filename: str, base_path: str | None = None) -> fitz.Document:
+    base = _base_for(day_id, base_path)
+    key = f"{base}/{filename}"
+    with _RENDER_LOCK:
+        if key in _DOC_CACHE:
+            _DOC_CACHE.move_to_end(key)
+            return _DOC_CACHE[key]
+        vols = get_volumes()
+        data = vols.download_bytes(vols.pdf_path(base, filename))
+        doc = fitz.open(stream=data, filetype="pdf")
+        _DOC_CACHE[key] = doc
+        if len(_DOC_CACHE) > _DOC_CACHE_MAX:
+            _, old = _DOC_CACHE.popitem(last=False)
+            try:
+                old.close()
+            except Exception:
+                pass
+        return doc
+
+
+def page_count(day_id: str, filename: str, base_path: str | None = None) -> int:
+    return _get_doc(day_id, filename, base_path).page_count
+
+
+def _cache_path(base: str, filename: str, n: int) -> Path:
+    # Keyed on base (validation vs inbox), page, and the render settings, so a
+    # zoom/quality change never serves stale bytes. PDF pages are immutable.
+    key = f"{base}|{filename}|{n}|z{PAGE_ZOOM}|q{JPEG_QUALITY}"
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return _CACHE_DIR / f"{digest}.jpg"
+
+
+def _render_raw(day_id: str, filename: str, n: int, base_path: str | None) -> bytes:
+    """Rasterise one page with fitz (no caching). Holds the render lock."""
+    with _RENDER_LOCK:
+        page = _get_doc(day_id, filename, base_path).load_page(n - 1)
+        pix = page.get_pixmap(matrix=fitz.Matrix(PAGE_ZOOM, PAGE_ZOOM),
+                              colorspace=fitz.csRGB, alpha=False)
+        return pix.tobytes("jpeg", jpg_quality=JPEG_QUALITY)
+
+
+def render_page_jpeg(day_id: str, filename: str, n: int, base_path: str | None = None) -> bytes:
+    """1-based page `n` as an RGB JPEG (csRGB avoids CMYK/colorspace glitches).
+
+    Served from the shared disk cache when present; otherwise rendered once,
+    written atomically, and cached. A missing/unwritable cache silently degrades
+    to plain rendering — never a 500.
+    """
+    base = _base_for(day_id, base_path)
+    path = _cache_path(base, filename, n)
+
+    try:
+        if path.exists():
+            return path.read_bytes()          # hot path — no lock, no fitz
+    except OSError:
+        pass
+
+    with _RENDER_LOCK:
+        try:                                   # double-check: a peer may have won
+            if path.exists():
+                return path.read_bytes()
+        except OSError:
             pass
-    return doc
+        data = _render_raw(day_id, filename, n, base_path)
+
+    _write_cache(path, data)
+    return data
 
 
-def page_count(day_id: str, filename: str) -> int:
-    return _get_doc(day_id, filename).page_count
+def _write_cache(path: Path, data: bytes) -> None:
+    """Atomic write (temp + replace) so a reader never sees a half file."""
+    global _write_count
+    try:
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except OSError:
+        return  # cache unwritable — the caller already has the bytes
+    _write_count += 1
+    if _write_count % _EVICT_EVERY == 0:
+        _evict_if_needed()
 
 
-def render_page_jpeg(day_id: str, filename: str, n: int) -> bytes:
-    """Render 1-based page `n` to an RGB JPEG (csRGB avoids CMYK/colorspace glitches)."""
-    page = _get_doc(day_id, filename).load_page(n - 1)
-    pix = page.get_pixmap(matrix=fitz.Matrix(PAGE_ZOOM, PAGE_ZOOM),
-                          colorspace=fitz.csRGB, alpha=False)
-    return pix.tobytes("jpeg", jpg_quality=JPEG_QUALITY)
+def _evict_if_needed() -> None:
+    """Cap the cache: delete oldest-by-mtime files until under ~80% of the cap."""
+    try:
+        files = [(p, p.stat()) for p in _CACHE_DIR.glob("*.jpg")]
+    except OSError:
+        return
+    total = sum(st.st_size for _, st in files)
+    cap = _CACHE_MAX_MB * 1024 * 1024
+    if total <= cap:
+        return
+    target = int(cap * 0.8)
+    for p, st in sorted(files, key=lambda t: t[1].st_mtime):
+        try:
+            p.unlink()
+            total -= st.st_size
+        except OSError:
+            continue
+        if total <= target:
+            break
+
+
+def prewarm(day_id: str, filename: str, total_pages: int, base_path: str | None = None) -> None:
+    """Render every page into the disk cache on a background thread, so the pages
+    are ready before the operator scrolls to them. No-op if disabled or already
+    warming this file. The per-page lock in render_page_jpeg lets interactive
+    requests interleave instead of waiting for the whole warm."""
+    if not _PREWARM_ON or total_pages < 1:
+        return
+    base = _base_for(day_id, base_path)
+    warm_key = f"{base}/{filename}"
+    with _WARMING_LOCK:
+        if warm_key in _WARMING:
+            return
+        _WARMING.add(warm_key)
+
+    def _run():
+        try:
+            for n in range(1, total_pages + 1):
+                try:
+                    render_page_jpeg(day_id, filename, n, base_path)
+                except Exception:
+                    pass  # one bad page must not abort the warm
+        finally:
+            with _WARMING_LOCK:
+                _WARMING.discard(warm_key)
+
+    threading.Thread(target=_run, name=f"prewarm:{warm_key}", daemon=True).start()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -9,17 +9,17 @@
   ],
   "tasks": [
     {
-      "task_key": "pdf_split",
+      "task_key": "nb_pdf_split",
       "notebook_task": {
-        "notebook_path": "/Workspace/Repos/lorenzo.muscillo@luxottica.com/gt-app-laplace/algorithm-prod/nb_pdf_split",
+        "notebook_path": "/Workspace/Users/lorenzo.muscillo@luxottica.com/gt-app-laplace/algorithm-prod/nb_pdf_split",
         "source": "WORKSPACE"
       }
     },
     {
-      "task_key": "sftp_upload",
-      "depends_on": [ { "task_key": "pdf_split" } ],
+      "task_key": "nb_sftp_upload",
+      "depends_on": [ { "task_key": "nb_pdf_split" } ],
       "notebook_task": {
-        "notebook_path": "/Workspace/Repos/lorenzo.muscillo@luxottica.com/gt-app-laplace/algorithm-prod/nb_sftp_upload",
+        "notebook_path": "/Workspace/Users/lorenzo.muscillo@luxottica.com/gt-app-laplace/algorithm-prod/nb_sftp_upload",
         "source": "WORKSPACE"
       }
     }

@@ -318,10 +318,17 @@ async function loadErrors() {
     return;
   }
   $("errors-body").innerHTML = `
+    <div class="bulk-bar">
+      <button id="err-bulk-manual" class="btn" disabled onclick="markSelectedManual()">✋ Mark selected manual (0)</button>
+    </div>
     <div class="tbl-wrap"><table>
-      <thead><tr><th>day</th><th>file</th><th>status</th><th>reason</th><th>actions</th></tr></thead>
+      <thead><tr>
+        <th><input type="checkbox" id="err-check-all" onclick="toggleAllErrors(this)"></th>
+        <th>day</th><th>file</th><th>status</th><th>reason</th><th>actions</th>
+      </tr></thead>
       <tbody>${rows.map((r) => `
         <tr>
+          <td><input type="checkbox" class="err-check" data-day="${esc(r.day_id)}" data-fn="${esc(r.filename)}" onclick="updateErrBulk()"></td>
           <td class="mono">${esc(r.day_id)}</td>
           <td class="fname">${esc(r.filename)}</td>
           <td>${esc(r.status)}${r.sftp_delivery_status ? " / " + esc(r.sftp_delivery_status) : ""}</td>
@@ -340,6 +347,48 @@ async function loadErrors() {
         </tr>`).join("")}
       </tbody></table></div>`;
 }
+
+function errChecks() {
+  return Array.from(document.querySelectorAll(".err-check"));
+}
+
+function toggleAllErrors(master) {
+  errChecks().forEach((c) => (c.checked = master.checked));
+  updateErrBulk();
+}
+
+function updateErrBulk() {
+  const sel = errChecks().filter((c) => c.checked);
+  const btn = $("err-bulk-manual");
+  if (btn) {
+    btn.textContent = `✋ Mark selected manual (${sel.length})`;
+    btn.disabled = sel.length === 0;
+  }
+  const master = $("err-check-all");
+  if (master) master.checked = sel.length > 0 && sel.length === errChecks().length;
+}
+
+async function markSelectedManual() {
+  const sel = errChecks().filter((c) => c.checked);
+  if (!sel.length) return;
+  if (!confirm(`Mark ${sel.length} file(s) as manual?`)) return;
+  // Group by day_id (the tab is normally day-scoped, but stay correct if not).
+  const byDay = {};
+  sel.forEach((c) => {
+    (byDay[c.dataset.day] ||= []).push(c.dataset.fn);
+  });
+  let total = 0;
+  for (const [day, filenames] of Object.entries(byDay)) {
+    const res = await jpost("/api/mark-manual", { day_id: day, filenames });
+    if (res.error) return toast(res.error, true);
+    total += res.count || 0;
+  }
+  toast(`marked ${total} manual`);
+  refreshTab();
+}
+window.toggleAllErrors = toggleAllErrors;
+window.updateErrBulk = updateErrBulk;
+window.markSelectedManual = markSelectedManual;
 
 function actBtn(type, row, label) {
   return `<button class="btn tiny" onclick="doAction('${type}','${esc(row.day_id)}','${esc(row.filename)}')">${label}</button> `;

@@ -228,6 +228,15 @@ body {
 .missing-list { columns: 3; font-size: 12px; margin-top: 10px; font-family: ui-monospace, Consolas, monospace; }
 
 /* ── Tables ──────────────────────────────────────────────────────────── */
+.bulk-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+
+/* ── Annotate mode toggle (scored sample ⇄ manual) ───────────────────── */
+.ann-modebar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg-btn { border: none; background: var(--surface); color: var(--muted); padding: 5px 14px; cursor: pointer; font: inherit; font-size: 13px; }
+.seg-btn:hover { color: var(--ink); }
+.seg-btn.active { background: var(--accent); color: #fff; }
+.manual-banner { font-size: 12.5px; color: var(--ink); background: var(--mark-overlay); border: 1px solid var(--mark-line); border-radius: 8px; padding: 5px 12px; }
 .tbl-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--grid); border-radius: 10px; }
 table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
 th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--grid); }

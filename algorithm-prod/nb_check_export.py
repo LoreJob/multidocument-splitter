@@ -60,9 +60,16 @@ print(f"Output ZIP:  {OUT_ZIP}")
 
 # DBTITLE 1,Sample files for annotation (seeded, idempotent)
 # ── Files of this batch that have a split prediction ──
+# Exclude boundary_source='manual': those are hand-annotated parse failures
+# (deliverable but never scored). Sampling one would pull it into validation/
+# and the metrics/gate — exactly what the manual path is meant to avoid.
 split_filenames = [
     r["filename"] for r in
-    spark.sql(f"SELECT filename FROM {TABLE_SPLIT} WHERE day_id = '{DAY_ID}'").collect()
+    spark.sql(
+        f"""SELECT filename FROM {TABLE_SPLIT}
+            WHERE day_id = '{DAY_ID}'
+              AND COALESCE(boundary_source, '') <> 'manual'"""
+    ).collect()
 ]
 
 if not split_filenames:

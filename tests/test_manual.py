@@ -1,0 +1,171 @@
+"""Unit tests for the manual (parse-failed) annotation path.
+
+The contract: save_manual must (1) write a ground-truth JSON marked source=manual,
+(2) insert a split_results row so the file becomes a delivery candidate, and
+(3) NEVER touch evaluation_results — manual files are deliverable but unscored.
+
+Plus the gate side of the same story: a sampled file marked 'manual' leaves the
+sample instead of blocking it forever (its PDF stays in validation/, since
+mark-manual cannot delete from a volume).
+
+Run: python -m pytest tests/ (or python tests/test_manual.py).
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from src.annotate import annotation, manual
+from src.pipeline import gate
+
+
+class FakeSql:
+    """Records every executed statement; str_param is a no-op placeholder."""
+    def __init__(self):
+        self.statements = []
+
+    def str_param(self, name, value):
+        return (name, value)
+
+    def execute(self, stmt, parameters=None):
+        self.statements.append(stmt)
+        return []
+
+
+class FakeVols:
+    def __init__(self):
+        self.uploaded = []
+
+    @staticmethod
+    def json_path(volume_path, filename):
+        return f"{volume_path}/{filename}.json"
+
+    def upload_json(self, path, payload):
+        self.uploaded.append((path, payload))
+
+    def list_json_stems(self, path):
+        return set()
+
+
+def _patch(monkeypatch):
+    sql = FakeSql()
+    vols = FakeVols()
+    monkeypatch.setattr(manual, "get_sql", lambda: sql)
+    monkeypatch.setattr(manual, "get_volumes", lambda: vols)
+    # save_ground_truth lives in annotation and resolves volumes there.
+    monkeypatch.setattr(annotation, "get_volumes", lambda: vols)
+    # _log_event pulls actor() from a Flask request; stub it out here.
+    monkeypatch.setattr(manual, "_log_event", lambda *a, **k: None)
+    return sql, vols
+
+
+def test_save_manual_writes_split_results(monkeypatch):
+    sql, vols = _patch(monkeypatch)
+    manual.save_manual(
+        day_id="20260731", filename="ABC_123", starts=[1, 4],
+        is_multidoc=True, total_pages=6, folder_id="ABC", annotator="me@x.com",
+    )
+    joined = "\n".join(sql.statements)
+    assert "split_results" in joined
+    assert any(s.strip().upper().startswith("INSERT INTO") and "split_results" in s
+               for s in sql.statements)
+    # delete-before-append keeps a re-save idempotent
+    assert any(s.strip().upper().startswith("DELETE FROM") and "split_results" in s
+               for s in sql.statements)
+
+
+def test_save_manual_never_touches_evaluation(monkeypatch):
+    sql, vols = _patch(monkeypatch)
+    manual.save_manual(
+        day_id="20260731", filename="ABC_123", starts=[1, 4],
+        is_multidoc=True, total_pages=6, folder_id="ABC", annotator="me@x.com",
+    )
+    assert all("evaluation_results" not in s for s in sql.statements)
+
+
+def test_save_manual_marks_gt_as_manual(monkeypatch):
+    sql, vols = _patch(monkeypatch)
+    manual.save_manual(
+        day_id="20260731", filename="ABC_123", starts=[1, 4],
+        is_multidoc=True, total_pages=6, folder_id="ABC", annotator="me@x.com",
+    )
+    assert len(vols.uploaded) == 1
+    _, payload = vols.uploaded[0]
+    assert payload["source"] == "manual"
+    assert payload["predicted_starts"] == [1, 4]
+    assert payload["annotator"] == "me@x.com"
+
+
+def test_split_insert_uses_manual_boundary_source(monkeypatch):
+    sql, vols = _patch(monkeypatch)
+    manual.save_manual(
+        day_id="20260731", filename="ABC_123", starts=[1, 4],
+        is_multidoc=True, total_pages=6, folder_id="ABC", annotator="me@x.com",
+    )
+    insert = next(s for s in sql.statements
+                  if s.strip().upper().startswith("INSERT INTO") and "split_results" in s)
+    assert "'manual'" in insert          # boundary_source / model_used / run_id
+    assert "array(1, 4)" in insert       # human starts as an int-literal array
+    assert "FALSE" in insert             # needs_review=false → not blocked
+
+
+def _patch_gate(monkeypatch, sampled, annotated, manual_files):
+    """Stub the gate's two volume listings and the 'manual' lookup."""
+    monkeypatch.setattr(gate.volumes, "validation_pdfs", lambda d: list(sampled))
+    monkeypatch.setattr(gate.volumes, "gt_jsons", lambda d: set(annotated))
+    monkeypatch.setattr(gate.queries, "manual_filenames", lambda d: set(manual_files))
+    monkeypatch.setattr(gate.queries, "gate_metrics", lambda d: None)
+
+
+def test_gate_drops_files_marked_manual(monkeypatch):
+    # B is marked manual: it stays in validation/ but must not block the gate.
+    _patch_gate(monkeypatch, sampled=["A", "B"], annotated={"A"}, manual_files={"B"})
+    g = gate.gate_state("20260731")
+    assert g["n_sampled"] == 1
+    assert g["missing"] == []
+    assert g["complete"] is True
+
+
+def test_gate_still_blocks_on_a_plain_missing_annotation(monkeypatch):
+    # Nothing marked manual: B is simply un-annotated and must keep the gate shut.
+    _patch_gate(monkeypatch, sampled=["A", "B"], annotated={"A"}, manual_files=set())
+    g = gate.gate_state("20260731")
+    assert g["n_sampled"] == 2
+    assert g["missing"] == ["B"]
+    assert g["complete"] is False
+
+
+def test_gate_does_not_deadlock_when_every_sampled_file_is_manual(monkeypatch):
+    # n_sampled == 0 → run-deliver's guard (n_sampled > 0 and not complete) passes.
+    _patch_gate(monkeypatch, sampled=["A"], annotated=set(), manual_files={"A"})
+    g = gate.gate_state("20260731")
+    assert g["n_sampled"] == 0
+    assert g["missing"] == []
+
+
+if __name__ == "__main__":
+    import types
+
+    class _MP:
+        """Minimal monkeypatch shim so the file runs without pytest too."""
+        def __init__(self):
+            self._undo = []
+
+        def setattr(self, obj, name, value):
+            self._undo.append((obj, name, getattr(obj, name)))
+            setattr(obj, name, value)
+
+        def undo(self):
+            for obj, name, old in reversed(self._undo):
+                setattr(obj, name, old)
+
+    fns = [v for k, v in sorted(globals().items())
+           if k.startswith("test_") and isinstance(v, types.FunctionType)]
+    for fn in fns:
+        mp = _MP()
+        try:
+            fn(mp)
+            print(f"ok  {fn.__name__}")
+        finally:
+            mp.undo()
+    print(f"\n{len(fns)} passed")

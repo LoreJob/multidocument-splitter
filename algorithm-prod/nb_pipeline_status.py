@@ -22,6 +22,8 @@
 
 dbutils.widgets.text("day_id", "")
 DAY_ID = dbutils.widgets.get("day_id").strip()
+if DAY_ID:
+    _require_safe(DAY_ID, "day_id")  # only notebook-side widget interpolated raw
 DAY_FILTER = f"WHERE day_id = '{DAY_ID}'" if DAY_ID else ""
 
 spark.sql(f"USE CATALOG `{CATALOG}`")

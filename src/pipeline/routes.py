@@ -234,6 +234,22 @@ def run_deliver():
                          f"annotated — finish the ground truth first",
                 "gate": g,
             }), 409
+        # Fail-closed cross-check: n_sampled comes from a volume listing that
+        # reads as EMPTY when validation/{day} is missing or unlistable
+        # (volumes.list_stems swallows NotFound). The awaiting_annotation
+        # event in pipeline_events is independent of the volume: if the gate
+        # was ever opened for this batch but the sample now lists as zero,
+        # something vanished — refuse instead of delivering unannotated.
+        if g["n_sampled"] == 0:
+            batches = queries.batch_status(day)
+            opened = bool(batches) and batches[0].get("gate_opened") in (True, "true")
+            if opened:
+                return jsonify({
+                    "error": f"annotation sample expected for {day} but validation/ "
+                             f"lists no PDFs (missing or unlistable) — refusing to "
+                             f"deliver an unannotated batch",
+                    "gate": g,
+                }), 409
         res = jobs.run_deliver(day, remote)
         return jsonify({"launched": True, **res})
     except Exception as e:  # noqa: BLE001

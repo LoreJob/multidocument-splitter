@@ -77,7 +77,13 @@ SELECT
   SUM(CASE WHEN sftp_delivery_status = 'delivered' THEN 1 ELSE 0 END) AS n_delivered,
   SUM(CASE WHEN sftp_delivery_status = 'failed'    THEN 1 ELSE 0 END) AS n_sftp_failed,
   SUM(CASE WHEN sftp_delivery_status = 'deferred'  THEN 1 ELSE 0 END) AS n_deferred,
-  SUM(CASE WHEN needs_review THEN 1 ELSE 0 END)                     AS n_needs_review
+  SUM(CASE WHEN needs_review THEN 1 ELSE 0 END)                     AS n_needs_review,
+  -- Review-blocked: needs_review senza esito di consegna (nb_pdf_split li
+  -- salta finché non c'è GT o approvazione). Vanno tolti dal denominatore di
+  -- 'delivered' in v_batch_status, altrimenti un batch consegnato con un file
+  -- bloccato regredisce a 'predicted' per sempre.
+  SUM(CASE WHEN needs_review AND sftp_delivery_status IS NULL
+           THEN 1 ELSE 0 END)                                       AS n_review_blocked
 FROM v_file_status
 GROUP BY day_id;
 
@@ -93,7 +99,8 @@ SELECT
   CASE
     WHEN f.n_delivered > 0
          AND f.n_delivered >= (f.n_files - f.n_skipped
-                               - (f.n_manual - f.n_manual_deliverable) - f.n_error)
+                               - (f.n_manual - f.n_manual_deliverable) - f.n_error
+                               - f.n_review_blocked)
       THEN 'delivered'
     WHEN f.n_sftp_pending + f.n_sftp_failed + f.n_deferred > 0
       THEN 'delivering'

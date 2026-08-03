@@ -28,6 +28,29 @@ from . import annotation, manual
 bp = Blueprint("annotate", __name__, url_prefix="/api/annotate")
 
 
+def _to_int_or_none(v) -> int | None:
+    """int(v) but 400-friendly: None instead of an uncaught ValueError → 500."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _validated_starts(raw, total_pages: int) -> list[int] | None:
+    """predicted_starts as sorted unique ints in 1..total_pages, else None.
+
+    Out-of-range pages are REJECTED, not silently dropped: an annotator
+    marking page 12 on a 10-page document must hear about it, otherwise the
+    boundary just vanishes from the saved ground truth."""
+    try:
+        starts = sorted({int(x) for x in raw})
+    except (TypeError, ValueError):
+        return None
+    if any(s < 1 or s > total_pages for s in starts):
+        return None
+    return starts
+
+
 @bp.get("/worklist")
 def worklist():
     day = day_id_arg()
@@ -113,16 +136,26 @@ def save():
 
         # total_pages / folder_id: trust the request (from the loaded PDF), fall
         # back to the model row when available.
-        total_pages = int(body.get("total_pages") or (model or {}).get("total_pages") or 0)
-        if total_pages <= 0:
+        total_pages = _to_int_or_none(body.get("total_pages")
+                                      or (model or {}).get("total_pages") or 0)
+        if not total_pages or total_pages <= 0:
             return jsonify({"error": "total_pages missing or invalid"}), 400
+        gt_starts = _validated_starts(starts, total_pages)
+        if gt_starts is None:
+            return jsonify({"error": "predicted_starts must be integers "
+                                     f"between 1 and {total_pages}"}), 400
         folder_id = body.get("folder_id") or (model or {}).get("folder_id")
+        # folder_id becomes split_results.folder_id and, downstream, a path
+        # segment (output/{day}/{folder_id} + the SFTP remote folder) — same
+        # charset rule as filenames.
+        if folder_id is not None and not valid_name(str(folder_id)):
+            return jsonify({"error": "invalid folder_id"}), 400
 
         payload = annotation.build_gt_payload(
             filename=name,
             folder_id=folder_id,
             total_pages=total_pages,
-            gt_starts=[int(x) for x in starts],
+            gt_starts=gt_starts,
             is_multidoc=is_multidoc,
             annotator=actor(),
             day_id=day,
@@ -215,15 +248,21 @@ def manual_save():
         return jsonify({"error": "predicted_starts must be a non-empty list"}), 400
 
     try:
-        total_pages = int(body.get("total_pages") or 0)
-        if total_pages <= 0:
+        total_pages = _to_int_or_none(body.get("total_pages") or 0)
+        if not total_pages or total_pages <= 0:
             return jsonify({"error": "total_pages missing or invalid"}), 400
+        gt_starts = _validated_starts(starts, total_pages)
+        if gt_starts is None:
+            return jsonify({"error": "predicted_starts must be integers "
+                                     f"between 1 and {total_pages}"}), 400
         folder_id = body.get("folder_id") or name.split("_")[0]
+        if not valid_name(str(folder_id)):
+            return jsonify({"error": "invalid folder_id"}), 400
 
         res = manual.save_manual(
             day_id=day,
             filename=name,
-            starts=[int(x) for x in starts],
+            starts=gt_starts,
             is_multidoc=is_multidoc,
             total_pages=total_pages,
             folder_id=folder_id,

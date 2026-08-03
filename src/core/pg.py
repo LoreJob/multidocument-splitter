@@ -21,6 +21,7 @@ practice). Connections are autocommit — reads plus single-row INSERTs only.
 """
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -31,6 +32,20 @@ from .config import config
 _PARAM = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 _TOKEN_TTL_S = 45 * 60          # refresh well before the ~1h expiry
 _POOL_MAX = 4
+
+
+def pg_user(workspace) -> str:
+    """The Postgres role name for the current identity.
+
+    Inside Databricks Apps the caller is a service principal and its Lakebase
+    role is named after the SP's client id — which the platform injects as
+    DATABRICKS_CLIENT_ID. Trust that first; me().user_name is the fallback for
+    local runs (a human, whose role is their email).
+    """
+    sp = os.environ.get("DATABRICKS_CLIENT_ID", "").strip()
+    if sp:
+        return sp
+    return workspace.current_user.me().user_name
 
 
 def translate_params(statement: str) -> str:
@@ -61,7 +76,7 @@ class PgClient:
 
         self._psycopg = psycopg
         self._w = WorkspaceClient()
-        self._user = self._w.current_user.me().user_name
+        self._user = pg_user(self._w)
         self._lock = threading.Lock()
         self._pool: list = []
         self._token: str | None = None

@@ -8,7 +8,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.core import db
 from src.core.config import config
-from src.core.pg import PgClient, stringify, translate_params
+from src.core.pg import PgClient, pg_user, stringify, translate_params
+
+
+class _FakeWorkspace:
+    class _Me:
+        user_name = "human@luxottica.com"
+
+    class _CurrentUser:
+        @staticmethod
+        def me():
+            return _FakeWorkspace._Me()
+
+    current_user = _CurrentUser()
+
+
+def test_pg_user_prefers_app_service_principal(monkeypatch):
+    # In Databricks Apps the PG role is named after the SP client id.
+    monkeypatch.setenv("DATABRICKS_CLIENT_ID", "fb442fb0-d35a-449d-be4f-1a82231af8ae")
+    assert pg_user(_FakeWorkspace()) == "fb442fb0-d35a-449d-be4f-1a82231af8ae"
+
+
+def test_pg_user_falls_back_to_me(monkeypatch):
+    monkeypatch.delenv("DATABRICKS_CLIENT_ID", raising=False)
+    assert pg_user(_FakeWorkspace()) == "human@luxottica.com"
 
 
 def test_translate_named_params():

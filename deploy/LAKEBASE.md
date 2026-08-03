@@ -62,10 +62,22 @@ writer (GT saves). The UC copy is frozen history as of the migration
 3. `sql/lakebase_ddl.sql` applied: schema `laplace`, `evaluation_results`,
    8 view twins + 4 bare-name alias views.
 4. 91 evaluation rows migrated (`deploy/migrate_evaluation_results.py`).
-5. Roles for the app service principals
-   (`app-laplace-prod` → `13c04e3e-…`, `app-laplace-dev` → `64af4581-…`,
-   LAKEBASE_OAUTH_V1) + grants: USAGE on both schemas, SELECT on all tables,
-   INSERT on `laplace.evaluation_results`.
+5. Roles for the app service principals (LAKEBASE_OAUTH_V1) + grants: USAGE on
+   both schemas, SELECT on all tables, INSERT on `laplace.evaluation_results`,
+   plus ALTER DEFAULT PRIVILEGES so future objects are covered:
+
+   | PG role id | SP client id | Databricks App |
+   |---|---|---|
+   | `app-cockpit` | `fb442fb0-d35a-449d-be4f-1a82231af8ae` | **laplace-multidocument-cockpit** (the one actually running) |
+   | `app-laplace-prod` | `13c04e3e-bf8b-4306-b012-047e7f7b3a1f` | laplace-prod-v4 |
+   | `app-laplace-dev` | `64af4581-8f63-47d5-babf-7b860f662fd7` | laplace-dev-v4 |
+
+   ⚠ **Every app that serves this repo needs its own PG role named after its SP
+   client id.** A missing role is the classic first-deploy failure: the app
+   cannot authenticate and every tab returns `internal error [id]` — the log
+   line shows a psycopg OperationalError. The Postgres username used by the app
+   is `DATABRICKS_CLIENT_ID` (see `pg_user()` in src/core/pg.py), so the role
+   name must match that value exactly.
 
 ## Operations
 

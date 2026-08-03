@@ -70,12 +70,23 @@ SFTP_USER = "LAPLACE"
 MAX_PUT_RETRIES = 3
 RETRY_BACKOFF_SEC = [5, 15, 45]
 
-# Password da Databricks secret scope (mai in chiaro nel codice)
+# Password da Databricks secret scope (mai in chiaro nel codice).
+# NESSUN fallback a widget: (a) avrebbe messo la password in chiaro nei
+# parametri del job / run history, (b) era comunque rotto — il widget
+# 'sftp_password' non veniva mai creato, quindi il fallback stesso alzava
+# InputWidgetNotDefined mascherando l'errore vero del secret.
 try:
     SFTP_PASS = dbutils.secrets.get(scope="sftp-laplace", key="sftp_password")
-except Exception:
-    # Fallback a widget per test manuali (NON usare in produzione)
-    SFTP_PASS = dbutils.widgets.get("sftp_password")
+except Exception as e:
+    events.log("error",
+               error_message=f"secret sftp-laplace/sftp_password unavailable: {str(e)[:300]}",
+               detail="preflight failed — nothing uploaded")
+    events.flush()
+    raise ValueError(
+        "SFTP password secret not available (scope='sftp-laplace', "
+        "key='sftp_password'). Fix the secret scope / SP permissions and "
+        "re-run job_deliver — there is deliberately no widget fallback."
+    ) from e
 
 print(f"{'═' * 60}")
 print(f"  nb_sftp_upload — Production Run")

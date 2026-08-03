@@ -10,13 +10,15 @@ Databricks → Workspace → your user folder → **Create → Git folder** →
 `https://github.com/loreluxottica/gt-app-laplace`, branch `main`.
 
 Confirm where it landed and note the path to `algorithm-prod/`. Common defaults:
-- `/Workspace/Repos/lorenzo.muscillo@luxottica.com/gt-app-laplace/algorithm-prod`
 - `/Workspace/Users/lorenzo.muscillo@luxottica.com/gt-app-laplace/algorithm-prod`
+- `/Workspace/Repos/lorenzo.muscillo@luxottica.com/gt-app-laplace/algorithm-prod`
 
-The JSON in this folder assumes the **Repos** path. If yours differs, fix the
-`notebook_path` values in `job_ingest.json` / `job_deliver.json` (find/replace the
-prefix). `nb_helpers` must sit beside the task notebooks — the Git folder guarantees
-that. `CLAUDE.md` / `run_local.py` are gitignored, so they won't appear (expected).
+**This workspace uses the `/Workspace/Users/...` path**, and so do the JSON files
+here (verified against the live jobs 2026-08-03). If yours differs, find/replace
+the prefix in the `notebook_path` values of `job_ingest.json` / `job_deliver.json`.
+`nb_helpers` must sit beside the task notebooks — the Git folder guarantees that.
+`CLAUDE.md` / `run_local.py` / `GUIDE.md` are gitignored, so they won't appear
+(expected).
 
 ## 2. Create the jobs
 
@@ -45,6 +47,12 @@ stays the source of truth (`databricks jobs get <id>` → the `settings` block).
 Job ids (created 2026-07-21):
 - job_ingest  = `909853340536600`
 - job_deliver = `775787615266557`
+
+Live settings verified against these files on 2026-08-03: name, params,
+`max_concurrent_runs=1`, queue enabled, serverless (no cluster block), task order
+and dependencies all match. Task keys are `nb_*` (`nb_parse_documents`,
+`nb_split_documents`, `nb_check_export`, `nb_pdf_split`, `nb_sftp_upload`) — keep
+them, run history and the flow view reference them by key.
 
 ## 3. Bind the jobs to the app (UI, then repo)
 

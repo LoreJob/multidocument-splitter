@@ -4,6 +4,10 @@ The contract: save_manual must (1) write a ground-truth JSON marked source=manua
 (2) insert a split_results row so the file becomes a delivery candidate, and
 (3) NEVER touch evaluation_results — manual files are deliverable but unscored.
 
+Plus the gate side of the same story: a sampled file marked 'manual' leaves the
+sample instead of blocking it forever (its PDF stays in validation/, since
+mark-manual cannot delete from a volume).
+
 Run: python -m pytest tests/ (or python tests/test_manual.py).
 """
 import sys
@@ -12,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.annotate import annotation, manual
+from src.pipeline import gate
 
 
 class FakeSql:
@@ -102,6 +107,40 @@ def test_split_insert_uses_manual_boundary_source(monkeypatch):
     assert "'manual'" in insert          # boundary_source / model_used / run_id
     assert "array(1, 4)" in insert       # human starts as an int-literal array
     assert "FALSE" in insert             # needs_review=false → not blocked
+
+
+def _patch_gate(monkeypatch, sampled, annotated, manual_files):
+    """Stub the gate's two volume listings and the 'manual' lookup."""
+    monkeypatch.setattr(gate.volumes, "validation_pdfs", lambda d: list(sampled))
+    monkeypatch.setattr(gate.volumes, "gt_jsons", lambda d: set(annotated))
+    monkeypatch.setattr(gate.queries, "manual_filenames", lambda d: set(manual_files))
+    monkeypatch.setattr(gate.queries, "gate_metrics", lambda d: None)
+
+
+def test_gate_drops_files_marked_manual(monkeypatch):
+    # B is marked manual: it stays in validation/ but must not block the gate.
+    _patch_gate(monkeypatch, sampled=["A", "B"], annotated={"A"}, manual_files={"B"})
+    g = gate.gate_state("20260731")
+    assert g["n_sampled"] == 1
+    assert g["missing"] == []
+    assert g["complete"] is True
+
+
+def test_gate_still_blocks_on_a_plain_missing_annotation(monkeypatch):
+    # Nothing marked manual: B is simply un-annotated and must keep the gate shut.
+    _patch_gate(monkeypatch, sampled=["A", "B"], annotated={"A"}, manual_files=set())
+    g = gate.gate_state("20260731")
+    assert g["n_sampled"] == 2
+    assert g["missing"] == ["B"]
+    assert g["complete"] is False
+
+
+def test_gate_does_not_deadlock_when_every_sampled_file_is_manual(monkeypatch):
+    # n_sampled == 0 → run-deliver's guard (n_sampled > 0 and not complete) passes.
+    _patch_gate(monkeypatch, sampled=["A"], annotated=set(), manual_files={"A"})
+    g = gate.gate_state("20260731")
+    assert g["n_sampled"] == 0
+    assert g["missing"] == []
 
 
 if __name__ == "__main__":

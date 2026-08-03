@@ -143,6 +143,22 @@ def run_summary(day_id: str | None = None) -> list[dict]:
     )
 
 
+def manual_filenames(day_id: str) -> set[str]:
+    """Files taken out of the automatic flow (status='manual').
+
+    They no longer block the annotation gate even if their PDF is still sitting in
+    validation/{day_id}/ — mark-manual updates the table but cannot delete from a
+    volume, and counting them as un-annotated deadlocks run-deliver forever.
+    """
+    sql = get_sql()
+    rows = sql.execute(
+        f"""SELECT filename FROM {config.fq('v_file_status')}
+            WHERE day_id = :day AND status = 'manual'""",
+        parameters=[sql.str_param("day", day_id)],
+    )
+    return {r["filename"] for r in rows}
+
+
 def gate_metrics(day_id: str) -> dict | None:
     """Aggregate GT-vs-model metrics for the batch's annotated sample."""
     sql = get_sql()

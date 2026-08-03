@@ -79,12 +79,21 @@ df_already_split = spark.sql(f"""
     WHERE day_id = '{DAY_ID}' AND sftp_delivery_status IS NOT NULL
 """)
 
+# 'manual' vale due cose: "annotato a mano nel tab Manual" (boundary_source
+# ='manual' → deliverable) e "lo gestisco fuori dalla pipeline" (mark-manual dal
+# tab Errors → NON deliverable). Solo il primo è candidato: senza questo filtro il
+# secondo verrebbe splittato e marcato 'pending' per un upload che non arriva mai.
 df_candidates = (
     spark.sql(f"""
-        SELECT filename, folder_id, total_pages, predicted_starts, n_documents,
-               COALESCE(needs_review, false) AS needs_review
-        FROM {TABLE_SPLIT}
-        WHERE day_id = '{DAY_ID}'
+        SELECT s.filename, s.folder_id, s.total_pages, s.predicted_starts,
+               s.n_documents, COALESCE(s.needs_review, false) AS needs_review,
+               s.boundary_source
+        FROM {TABLE_SPLIT} s
+        WHERE s.day_id = '{DAY_ID}'
+          AND (s.boundary_source = 'manual'
+               OR NOT EXISTS (SELECT 1 FROM {TABLE_LOG} l
+                              WHERE l.day_id = s.day_id AND l.filename = s.filename
+                                AND l.status = 'manual'))
     """)
     .join(df_already_split, on="filename", how="left_anti")
 )
@@ -125,8 +134,16 @@ if n_to_split == 0:
     dbutils.notebook.exit("NO_FILES_TO_SPLIT")
 
 n_gt = sum(1 for t in split_tasks if t["filename"] in gt_by_filename)
+# Annotati a mano: 'manual' è uno status terminale scritto solo dalla dashboard e
+# non va sovrascritto con 'error' (il file sparirebbe dal worklist manuale, che lo
+# cerca proprio con status='manual', perdendo l'annotazione). Gli errori di split
+# su questi file finiscono su sftp_delivery_status='failed' — visibile in
+# v_stuck_files senza toccare lo status.
+manual_filenames = {t["filename"] for t in split_tasks
+                    if t["boundary_source"] == "manual"}
 print(f"File da splittare: {n_to_split}")
 print(f"Ground truth disponibili: {n_gt}/{n_to_split} file")
+print(f"  di cui annotati a mano:  {len(manual_filenames)}")
 
 # COMMAND ----------
 
@@ -253,12 +270,27 @@ merge_processing_log(
         "error_message": e["error"][:400],
         "error_stage": "pdf_split",
         "completed_at": now,
-    } for e in split_error],
+    } for e in split_error if e["filename"] not in manual_filenames],
     set_cols=["status", "error_message", "error_stage", "completed_at"],
     match_status=["done"],
 )
 
-print(f"✓ processing_log aggiornato: {len(split_ok)} pending, {len(split_error)} error")
+# Errori sui file annotati a mano: status intatto, l'errore va sul canale sftp
+# (v_stuck_files include già sftp_delivery_status IN ('failed','deferred')).
+merge_processing_log(
+    DAY_ID, RUN_ID,
+    rows=[{
+        "filename": e["filename"],
+        "sftp_delivery_status": "failed",
+        "sftp_delivery_error": f"pdf_split failed: {e['error'][:300]}",
+    } for e in split_error if e["filename"] in manual_filenames],
+    set_cols=["sftp_delivery_status", "sftp_delivery_error"],
+    match_status=["manual"],
+)
+
+n_manual_err = sum(1 for e in split_error if e["filename"] in manual_filenames)
+print(f"✓ processing_log aggiornato: {len(split_ok)} pending, "
+      f"{len(split_error) - n_manual_err} error, {n_manual_err} manual failed")
 
 # COMMAND ----------
 

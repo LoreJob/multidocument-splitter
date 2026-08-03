@@ -46,6 +46,8 @@ RUN_ID = get_run_id()
 PATHS = volume_paths(DAY_ID)
 OUTPUT_DATE_PATH = PATHS["output"]
 
+TABLE_SPLIT = f"`{CATALOG}`.`{SCHEMA}`.`split_results`"
+
 # ── Remote base path su SFTP (REQUIRED, typed by the user per delivery) ──
 dbutils.widgets.text("sftp_remote_base", "")
 SFTP_REMOTE_BASE = dbutils.widgets.get("sftp_remote_base").strip().rstrip("/")
@@ -122,12 +124,24 @@ print(f"✓ Preflight: {len(existing_remote_folders)} existing remote subfolders
 
 # DBTITLE 1,Build upload list (missing remote folders → deferred)
 # ── Carica lista file da uploadare (sftp_delivery_status = 'pending') ──
+# Due sorgenti legittime: il flusso automatico (status='done') e i file annotati
+# a mano nel tab Manual (status='manual' + una riga split_results con
+# boundary_source='manual'). Un file marcato manual dal tab Errors — "lo gestisco
+# fuori dalla pipeline" — non ha quella riga e resta escluso.
+# EXISTS e non JOIN: un rerun non idempotente può lasciare >1 riga split_results
+# per (day_id, filename) e una JOIN duplicherebbe i pending.
 df_pending = spark.sql(f"""
-    SELECT filename, folder_id, sftp_target_folder
-    FROM {TABLE_LOG}
-    WHERE day_id = '{DAY_ID}'
-      AND sftp_delivery_status = 'pending'
-      AND status = 'done'
+    SELECT l.filename, l.folder_id, l.sftp_target_folder
+    FROM {TABLE_LOG} l
+    WHERE l.day_id = '{DAY_ID}'
+      AND l.sftp_delivery_status = 'pending'
+      AND (
+            l.status = 'done'
+         OR (l.status = 'manual' AND EXISTS (
+               SELECT 1 FROM {TABLE_SPLIT} s
+               WHERE s.day_id = l.day_id AND s.filename = l.filename
+                 AND s.boundary_source = 'manual'))
+      )
 """).collect()
 
 n_pending = len(df_pending)
@@ -412,7 +426,7 @@ if filenames_ok:
         } for fname in filenames_ok],
         set_cols=["sftp_delivery_status", "sftp_delivered_at",
                   "sftp_target_folder", "sftp_delivery_error"],
-        match_status=["done"],
+        match_status=["done", "manual"],  # 'manual' = annotato a mano, deliverable
     )
     for fname in filenames_ok:
         events.log("delivered", filename=fname, detail=remote_by_fname[fname])

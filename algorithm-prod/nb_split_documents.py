@@ -142,10 +142,13 @@ print(f"{'═' * 60}")
 #     print("   Riesegui dal Cell 6 (GCS Primary Pass) per rigenerare gcs_parsed.")
 
 # # ── Ripristina temp views da UC tables (serve per Cell 9 verification) ──
-# spark.sql(f"SELECT * FROM `{CATALOG}`.`{SCHEMA}`.`page_signals`").createOrReplaceTempView("page_signals")
+# # FILTRATE per day_id: le temp view normali contengono SOLO il batch corrente;
+# # ripristinarle dall'intera tabella mescolerebbe tutti i batch nei pass
+# # chunked/verification e nella write finale.
+# spark.sql(f"SELECT * FROM `{CATALOG}`.`{SCHEMA}`.`page_signals` WHERE day_id = '{DAY_ID}'").createOrReplaceTempView("page_signals")
 # print(f"\u2713 page_signals temp view ripristinata")
 
-# spark.sql(f"SELECT * FROM `{CATALOG}`.`{SCHEMA}`.`package_summaries`").createOrReplaceTempView("package_summaries")
+# spark.sql(f"SELECT * FROM `{CATALOG}`.`{SCHEMA}`.`package_summaries` WHERE day_id = '{DAY_ID}'").createOrReplaceTempView("package_summaries")
 # print(f"\u2713 package_summaries temp view ripristinata")
 
 # print(f"\n\u2713 Recovery completata \u2014 puoi rieseguire da Cell 8")
@@ -909,9 +912,17 @@ def apply_corrections(proposed: list, verify_response: str, total_pages: int) ->
     
     result = set([1] + list(proposed))
     for c in corrections:
-        action = c.get('action', '').lower()
-        from_p = c.get('from_page')
-        to_p = c.get('to_page')
+        # The LLM controls this shape: a non-dict element or a string page
+        # number ("to_page": "12") must skip the correction, not raise a
+        # TypeError inside the UDF and kill the whole write cell.
+        if not isinstance(c, dict):
+            continue
+        action = str(c.get('action', '')).lower()
+        try:
+            from_p = int(c['from_page']) if c.get('from_page') is not None else None
+            to_p = int(c['to_page']) if c.get('to_page') is not None else None
+        except (TypeError, ValueError):
+            continue
         if action == 'move':
             if from_p and from_p in result and from_p != 1:
                 result.discard(from_p)
@@ -965,7 +976,7 @@ print(f"  Docs per PDF: avg={stats['avg_docs']:.1f}, max={stats['max_docs']}")
 
 # DBTITLE 1,Write split_results and update processing_log
 # ── Write final results to split_results UC table ──
-from pyspark.sql.functions import col, lit, size, current_timestamp, when
+from pyspark.sql.functions import col, lit, size, current_timestamp, when, coalesce
 
 # Determine model used per file
 df_model_info = spark.sql(f"""
@@ -981,6 +992,14 @@ df_model_info = spark.sql(f"""
 # boundary_source per file (primary / fallback / chunked / ultimate_fallback)
 df_source = spark.sql("SELECT filename, boundary_source FROM gcs_parsed")
 
+# verification_applied per file: TRUE only when the file went through the
+# verification pass AND the verify call succeeded. Files that were never
+# verified (single-doc, no boundaries > 1) or whose verify call errored keep
+# their original boundaries — recording TRUE for them was a lie in the data.
+df_verified = spark.sql(
+    "SELECT filename, (verify_error IS NULL) AS verification_applied FROM corrections"
+)
+
 df_results = (
     spark.sql("SELECT filename, predicted_starts FROM final_boundaries")
     .join(
@@ -989,6 +1008,7 @@ df_results = (
     )
     .join(df_model_info, on="filename", how="left")
     .join(df_source, on="filename", how="left")
+    .join(df_verified, on="filename", how="left")
     .select(
         col("filename"),
         col("folder_id"),
@@ -998,7 +1018,7 @@ df_results = (
         when(col("fallback_used"), col("fallback_model"))
             .otherwise(col("primary_model")).alias("model_used"),
         col("fallback_used").alias("fallback_used"),
-        lit(True).alias("verification_applied"),
+        coalesce(col("verification_applied"), lit(False)).alias("verification_applied"),
         current_timestamp().alias("processing_timestamp"),
         lit(RUN_ID).alias("run_id"),
         lit(DAY_ID).alias("day_id"),

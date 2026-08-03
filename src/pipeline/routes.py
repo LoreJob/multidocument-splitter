@@ -24,11 +24,11 @@ Routes (mounted at /api)
 """
 from __future__ import annotations
 
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, jsonify, request
 
 from ..core import auth, volumes
 from ..core.config import config
-from ..core.http import day_id_arg, optional_day_arg, valid_name
+from ..core.http import day_id_arg, internal_error, optional_day_arg, valid_name
 from . import actions, gate, jobs, queries
 
 bp = Blueprint("pipeline", __name__, url_prefix="/api")
@@ -79,9 +79,8 @@ def days():
                 row["gate"] = {k: g[k] for k in ("n_sampled", "n_annotated", "complete")}
             out.append(row)
         return jsonify({"days": out})
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("days failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("days")
 
 
 @bp.get("/progress")
@@ -98,9 +97,8 @@ def progress():
             "active_runs": jobs.active_runs(),
             "events": queries.recent_events(day, limit=15),
         })
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("progress failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("progress")
 
 
 @bp.get("/gate")
@@ -110,9 +108,8 @@ def gate_route():
         return jsonify({"error": "day_id required"}), 400
     try:
         return jsonify(gate.gate_state(day))
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("gate failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("gate")
 
 
 @bp.get("/files")
@@ -124,9 +121,8 @@ def files():
     q = request.args.get("q", "").strip() or None
     try:
         return jsonify({"files": queries.files(day, status, q)})
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("files failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("files")
 
 
 @bp.get("/file/<name>")
@@ -138,9 +134,8 @@ def file_detail(name: str):
         return jsonify({"error": "day_id required"}), 400
     try:
         return jsonify(queries.file_detail(day, name))
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("file_detail failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("file_detail")
 
 
 @bp.get("/errors")
@@ -150,9 +145,8 @@ def errors():
         return jsonify({"error": "invalid day_id"}), 400
     try:
         return jsonify({"stuck": queries.stuck_files(day)})
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("errors failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("errors")
 
 
 @bp.get("/sftp")
@@ -162,9 +156,8 @@ def sftp():
         return jsonify({"error": "invalid day_id"}), 400
     try:
         return jsonify(queries.sftp_board(day))
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("sftp failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("sftp")
 
 
 @bp.get("/review")
@@ -174,9 +167,8 @@ def review():
         return jsonify({"error": "invalid day_id"}), 400
     try:
         return jsonify({"needs_review": queries.needs_review(day)})
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("review failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("review")
 
 
 @bp.get("/runs")
@@ -186,9 +178,8 @@ def runs():
         return jsonify({"error": "invalid day_id"}), 400
     try:
         return jsonify({"runs": queries.run_summary(day)})
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("runs failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("runs")
 
 
 # ── Job launchers ────────────────────────────────────────────────────────────
@@ -209,9 +200,8 @@ def run_ingest():
     try:
         res = jobs.run_ingest(day, pct)
         return jsonify({"launched": True, **res})
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("run_ingest failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("run_ingest")
 
 
 @bp.post("/run-deliver")
@@ -236,9 +226,8 @@ def run_deliver():
             }), 409
         res = jobs.run_deliver(day, remote)
         return jsonify({"launched": True, **res})
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("run_deliver failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("run_deliver")
 
 
 @bp.post("/redeliver")
@@ -260,9 +249,8 @@ def redeliver():
         n = actions.reset_deferred(day, filenames)
         res = jobs.run_deliver(day, remote)
         return jsonify({"launched": True, "reset": n if n >= 0 else "all", **res})
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("redeliver failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("redeliver")
 
 
 @bp.post("/mark-manual")
@@ -279,9 +267,8 @@ def mark_manual_bulk():
     try:
         n = actions.mark_manual_bulk(day, filenames)
         return jsonify({"done": True, "count": n, "message": f"marked {n} manual"})
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("mark-manual bulk failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("mark-manual bulk")
 
 
 # ── File-level actions ───────────────────────────────────────────────────────
@@ -300,6 +287,5 @@ def action(action_type: str):
     try:
         msg = fn(day, name)
         return jsonify({"done": True, "message": msg})
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("action failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("action")

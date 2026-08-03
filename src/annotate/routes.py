@@ -19,10 +19,10 @@ Routes (mounted at /api/annotate)
 """
 from __future__ import annotations
 
-from flask import Blueprint, Response, current_app, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
 from ..core.auth import actor
-from ..core.http import day_id_arg, valid_name
+from ..core.http import day_id_arg, internal_error, valid_name
 from . import annotation, manual
 
 bp = Blueprint("annotate", __name__, url_prefix="/api/annotate")
@@ -35,9 +35,8 @@ def worklist():
         return jsonify({"error": "day_id query parameter required"}), 400
     try:
         return jsonify(annotation.build_worklist(day))
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("worklist failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("worklist")
 
 
 @bp.get("/file/<name>")
@@ -60,9 +59,8 @@ def file_detail(name: str):
             "folder_id": name.split("_")[0],
             "ground_truth": gt,
         })
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("file_detail failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("file_detail")
 
 
 @bp.get("/page/<name>/<int:n>")
@@ -79,18 +77,16 @@ def page_image(name: str, n: int):
         resp = Response(jpeg, mimetype="image/jpeg")
         resp.headers["Cache-Control"] = "public, max-age=3600"
         return resp
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("page_image failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("page_image")
 
 
 @bp.get("/stats")
 def stats():
     try:
         return jsonify(annotation.get_eval_stats())
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("stats failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("stats")
 
 
 @bp.post("/save")
@@ -136,9 +132,8 @@ def save():
             "ground_truth": payload,
             "evaluation": metrics,
         })
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("save failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("save")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -152,9 +147,8 @@ def manual_worklist():
         return jsonify({"error": "day_id query parameter required"}), 400
     try:
         return jsonify(manual.build_worklist(day))
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("manual worklist failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("manual worklist")
 
 
 @bp.get("/manual/file/<name>")
@@ -175,9 +169,8 @@ def manual_file_detail(name: str):
             "folder_id": name.split("_")[0],
             "ground_truth": gt,
         })
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("manual file_detail failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("manual file_detail")
 
 
 @bp.get("/manual/page/<name>/<int:n>")
@@ -194,9 +187,8 @@ def manual_page_image(name: str, n: int):
         resp = Response(jpeg, mimetype="image/jpeg")
         resp.headers["Cache-Control"] = "public, max-age=3600"
         return resp
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("manual page_image failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("manual page_image")
 
 
 @bp.post("/manual/save")
@@ -230,6 +222,5 @@ def manual_save():
             annotator=actor(),
         )
         return jsonify(res)
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("manual save failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("manual save")

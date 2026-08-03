@@ -81,11 +81,14 @@ if n_total == 0:
     print(f"⚠️  inbox/{DAY_ID} empty — no PDFs to process. Early termination.")
     dbutils.notebook.exit("NO_FILES")
 
-# Classify files by size
+# Classify files by size — on RAW BYTES, the same unit the parse cells filter
+# on. Classifying on rounded MB left a ~5KB window just above 100MB where a
+# file was 'large' here but excluded by both byte filters below → registered
+# 'pending' and never picked up by anything.
 df_inbox = df_inbox.withColumn(
     "size_category",
-    when(col("file_size_mb") > MAX_FILE_SIZE_MB, "oversized")
-    .when(col("file_size_mb") > LARGE_FILE_THRESHOLD_MB, "large")
+    when(col("length") > MAX_FILE_SIZE_MB * 1024 * 1024, "oversized")
+    .when(col("length") > LARGE_FILE_THRESHOLD_MB * 1024 * 1024, "large")
     .otherwise("standard")
 )
 

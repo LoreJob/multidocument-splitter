@@ -7,10 +7,24 @@ and volume paths.
 from __future__ import annotations
 
 import re
+import uuid
 
-from flask import request
+from flask import current_app, jsonify, request
 
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def internal_error(tag: str):
+    """500 with a short correlation id instead of echoing str(e) to the client.
+
+    The full stack trace goes to the app log tagged with the same id, so an
+    operator greps the logs for what the toast shows. Exception text can carry
+    SQL fragments, volume paths or request-derived content — it stays server-side.
+    Call from inside an `except` block (logger.exception needs the active one).
+    """
+    eid = uuid.uuid4().hex[:8]
+    current_app.logger.exception("%s failed [%s]", tag, eid)
+    return jsonify({"error": f"internal error [{eid}] — check the app logs"}), 500
 
 
 def valid_name(name: str) -> bool:

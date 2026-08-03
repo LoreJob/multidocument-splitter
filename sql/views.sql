@@ -149,14 +149,17 @@ SELECT *,
       THEN 'stuck in parsing > 2h'
     WHEN status = 'parsed' AND completed_at < current_timestamp() - INTERVAL 12 HOURS
       THEN 'parsed but never split (> 12h)'
+    -- Before the generic 24h arm, or it would shadow this more specific label.
+    WHEN sftp_delivery_status = 'pending' AND archived_path IS NULL
+         AND completed_at < current_timestamp() - INTERVAL 2 HOURS
+      THEN 'split but not archived (crash between passes?)'
     WHEN sftp_delivery_status = 'pending'
          AND completed_at < current_timestamp() - INTERVAL 24 HOURS
       THEN 'awaiting sftp > 24h'
     WHEN needs_review AND sftp_delivery_status IS NULL
       THEN CONCAT('needs review (', COALESCE(boundary_source, '?'), ') — delivery blocked')
-    WHEN sftp_delivery_status = 'pending' AND archived_path IS NULL
-         AND completed_at < current_timestamp() - INTERVAL 2 HOURS
-      THEN 'split but not archived (crash between passes?)'
+    WHEN status = 'pending' AND created_at < current_timestamp() - INTERVAL 2 HOURS
+      THEN 'stuck in pending > 2h (never picked up by parse)'
   END AS stuck_reason
 FROM v_file_status
 WHERE
@@ -164,8 +167,11 @@ WHERE
   OR sftp_delivery_status IN ('failed', 'deferred')
   OR (status = 'parsing' AND started_at < current_timestamp() - INTERVAL 2 HOURS)
   OR (status = 'parsed' AND completed_at < current_timestamp() - INTERVAL 12 HOURS)
+  OR (sftp_delivery_status = 'pending' AND archived_path IS NULL
+      AND completed_at < current_timestamp() - INTERVAL 2 HOURS)
   OR (sftp_delivery_status = 'pending' AND completed_at < current_timestamp() - INTERVAL 24 HOURS)
-  OR (needs_review AND sftp_delivery_status IS NULL);
+  OR (needs_review AND sftp_delivery_status IS NULL)
+  OR (status = 'pending' AND created_at < current_timestamp() - INTERVAL 2 HOURS);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- v_sftp_board — delivery completeness per (day_id, folder_id).

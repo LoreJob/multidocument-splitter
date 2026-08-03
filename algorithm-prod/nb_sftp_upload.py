@@ -157,10 +157,12 @@ if n_pending == 0:
 upload_tasks = []
 deferred_rows = []
 missing_local = []
+missing_local_rows = []
 for row in df_pending:
     folder_path = row["sftp_target_folder"]  # es. /Volumes/.../output/{day_id}/34572
     if not folder_path or not os.path.exists(folder_path):
         missing_local.append(row["filename"])
+        missing_local_rows.append(row)
         events.log("error", filename=row["filename"], folder_id=row["folder_id"],
                    error_message=f"local output folder missing: {folder_path}")
         continue
@@ -176,6 +178,21 @@ for row in df_pending:
                 "remote_folder": f"{SFTP_REMOTE_BASE}/{row['folder_id']}",
                 "remote_path":   f"{SFTP_REMOTE_BASE}/{row['folder_id']}/{fname}",
             })
+
+# Output locale mancante → 'failed' con motivo. Senza questa write il file
+# restava 'pending' per sempre: mai ritentato, invisibile in v_stuck_files
+# per 24h, conteggi di consegna mai riconciliati. Da 'failed' il retry-sftp
+# del control tower può rimetterlo in coda dopo un re-split.
+if missing_local_rows:
+    merge_processing_log(
+        DAY_ID, RUN_ID,
+        rows=[{
+            "filename": r["filename"],
+            "sftp_delivery_status": "failed",
+            "sftp_delivery_error": f"local output folder missing: {r['sftp_target_folder']}",
+        } for r in missing_local_rows],
+        set_cols=["sftp_delivery_status", "sftp_delivery_error"],
+    )
 
 # Mark deferred files now — documented and re-deliverable, never silent
 if deferred_rows:

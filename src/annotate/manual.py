@@ -19,7 +19,7 @@ volume listing.
 from __future__ import annotations
 
 from ..core.config import config
-from ..core.db import get_sql
+from ..core.db import get_reader, get_sql
 from ..core.volumes import get_volumes
 from ..pipeline.actions import _log_event
 from . import annotation
@@ -34,9 +34,11 @@ _SPLIT = config.fq(config.TABLE_SPLIT_RESULTS)
 def build_worklist(day_id: str) -> dict:
     """Files with status='manual' for the batch, split into pending / done (GT
     JSON already written)."""
-    sql = get_sql()
+    # Read → serving layer; the writes below (_upsert_manual_split, events)
+    # stay on the warehouse: nb_pdf_split reads that split_results row from UC.
+    sql = get_reader()
     rows = sql.execute(
-        f"""SELECT filename FROM {_LOG}
+        f"""SELECT filename FROM {config.rq(config.TABLE_PROCESSING_LOG)}
             WHERE day_id = :day AND status = 'manual'""",
         parameters=[sql.str_param("day", day_id)],
     )

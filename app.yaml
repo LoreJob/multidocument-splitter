@@ -58,6 +58,21 @@ env:
   # - name: OPERATOR_EMAILS
   #   value: "lorenzo.muscillo@luxottica.com"
 
+  # ── Lakebase serving layer (see deploy/LAKEBASE.md) ────────────────────────
+  # App READS come from Lakebase Postgres (synced tables + native
+  # evaluation_results). "0" = instant rollback to the warehouse; nothing else
+  # changes. Pipeline writes always stay on Unity Catalog.
+  - name: LAKEBASE_ENABLED
+    value: "1"
+  - name: LAKEBASE_ENDPOINT
+    value: "projects/laplace-multidocument-cockpit/branches/production/endpoints/primary"
+  - name: LAKEBASE_HOST
+    value: "ep-broad-flower-e29e9vb7.database.westeurope.azuredatabricks.net"
+  - name: LAKEBASE_DB
+    value: "databricks_postgres"
+  - name: LAKEBASE_SCHEMA
+    value: "laplace"
+
 # Declare the resources the app's service principal needs. The jobs matter now
 # that the tower is deployed rather than run locally under a personal token:
 # run_now() executes as the SP, so without CAN_MANAGE_RUN the launch fails with a

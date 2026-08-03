@@ -77,3 +77,18 @@ def get_sql() -> SqlClient:
     if _client is None:
         _client = SqlClient()
     return _client
+
+
+def get_reader():
+    """Client for app READS (and evaluation_results writes).
+
+    LAKEBASE_ENABLED → Lakebase Postgres (synced tables + native
+    evaluation_results, see core/pg.py); otherwise the SQL warehouse.
+    Pair table names with config.rq(). WRITES to UC-owned tables
+    (processing_log, split_results, pipeline_events) always stay on
+    get_sql() + config.fq() — the notebooks own those tables."""
+    if config.LAKEBASE_ENABLED:
+        from .pg import get_pg
+
+        return get_pg()
+    return get_sql()

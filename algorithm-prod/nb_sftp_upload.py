@@ -70,12 +70,23 @@ SFTP_USER = "LAPLACE"
 MAX_PUT_RETRIES = 3
 RETRY_BACKOFF_SEC = [5, 15, 45]
 
-# Password da Databricks secret scope (mai in chiaro nel codice)
+# Password da Databricks secret scope (mai in chiaro nel codice).
+# NESSUN fallback a widget: (a) avrebbe messo la password in chiaro nei
+# parametri del job / run history, (b) era comunque rotto — il widget
+# 'sftp_password' non veniva mai creato, quindi il fallback stesso alzava
+# InputWidgetNotDefined mascherando l'errore vero del secret.
 try:
     SFTP_PASS = dbutils.secrets.get(scope="sftp-laplace", key="sftp_password")
-except Exception:
-    # Fallback a widget per test manuali (NON usare in produzione)
-    SFTP_PASS = dbutils.widgets.get("sftp_password")
+except Exception as e:
+    events.log("error",
+               error_message=f"secret sftp-laplace/sftp_password unavailable: {str(e)[:300]}",
+               detail="preflight failed — nothing uploaded")
+    events.flush()
+    raise ValueError(
+        "SFTP password secret not available (scope='sftp-laplace', "
+        "key='sftp_password'). Fix the secret scope / SP permissions and "
+        "re-run job_deliver — there is deliberately no widget fallback."
+    ) from e
 
 print(f"{'═' * 60}")
 print(f"  nb_sftp_upload — Production Run")
@@ -157,10 +168,12 @@ if n_pending == 0:
 upload_tasks = []
 deferred_rows = []
 missing_local = []
+missing_local_rows = []
 for row in df_pending:
     folder_path = row["sftp_target_folder"]  # es. /Volumes/.../output/{day_id}/34572
     if not folder_path or not os.path.exists(folder_path):
         missing_local.append(row["filename"])
+        missing_local_rows.append(row)
         events.log("error", filename=row["filename"], folder_id=row["folder_id"],
                    error_message=f"local output folder missing: {folder_path}")
         continue
@@ -176,6 +189,21 @@ for row in df_pending:
                 "remote_folder": f"{SFTP_REMOTE_BASE}/{row['folder_id']}",
                 "remote_path":   f"{SFTP_REMOTE_BASE}/{row['folder_id']}/{fname}",
             })
+
+# Output locale mancante → 'failed' con motivo. Senza questa write il file
+# restava 'pending' per sempre: mai ritentato, invisibile in v_stuck_files
+# per 24h, conteggi di consegna mai riconciliati. Da 'failed' il retry-sftp
+# del control tower può rimetterlo in coda dopo un re-split.
+if missing_local_rows:
+    merge_processing_log(
+        DAY_ID, RUN_ID,
+        rows=[{
+            "filename": r["filename"],
+            "sftp_delivery_status": "failed",
+            "sftp_delivery_error": f"local output folder missing: {r['sftp_target_folder']}",
+        } for r in missing_local_rows],
+        set_cols=["sftp_delivery_status", "sftp_delivery_error"],
+    )
 
 # Mark deferred files now — documented and re-deliverable, never silent
 if deferred_rows:

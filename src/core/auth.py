@@ -26,12 +26,11 @@ def actor() -> str:
 def can_operate() -> bool:
     """May this caller launch jobs and mutate pipeline state?
 
-    Today: everyone. To restrict, set OPERATOR_EMAILS in app.yaml and change
-    the body to:
-
-        return (not config.OPERATOR_EMAILS) or current_user() in config.OPERATOR_EMAILS
+    Empty OPERATOR_EMAILS (the default) = everyone may operate — today's
+    behavior. Setting OPERATOR_EMAILS in app.yaml (comma-separated, matched
+    lowercase) turns enforcement on with no other change.
 
     Annotation is deliberately NOT gated by this — annotators are the wide
     audience, operators the narrow one.
     """
-    return True
+    return (not config.OPERATOR_EMAILS) or current_user() in config.OPERATOR_EMAILS

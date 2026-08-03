@@ -77,7 +77,13 @@ SELECT
   SUM(CASE WHEN sftp_delivery_status = 'delivered' THEN 1 ELSE 0 END) AS n_delivered,
   SUM(CASE WHEN sftp_delivery_status = 'failed'    THEN 1 ELSE 0 END) AS n_sftp_failed,
   SUM(CASE WHEN sftp_delivery_status = 'deferred'  THEN 1 ELSE 0 END) AS n_deferred,
-  SUM(CASE WHEN needs_review THEN 1 ELSE 0 END)                     AS n_needs_review
+  SUM(CASE WHEN needs_review THEN 1 ELSE 0 END)                     AS n_needs_review,
+  -- Review-blocked: needs_review senza esito di consegna (nb_pdf_split li
+  -- salta finché non c'è GT o approvazione). Vanno tolti dal denominatore di
+  -- 'delivered' in v_batch_status, altrimenti un batch consegnato con un file
+  -- bloccato regredisce a 'predicted' per sempre.
+  SUM(CASE WHEN needs_review AND sftp_delivery_status IS NULL
+           THEN 1 ELSE 0 END)                                       AS n_review_blocked
 FROM v_file_status
 GROUP BY day_id;
 
@@ -93,7 +99,8 @@ SELECT
   CASE
     WHEN f.n_delivered > 0
          AND f.n_delivered >= (f.n_files - f.n_skipped
-                               - (f.n_manual - f.n_manual_deliverable) - f.n_error)
+                               - (f.n_manual - f.n_manual_deliverable) - f.n_error
+                               - f.n_review_blocked)
       THEN 'delivered'
     WHEN f.n_sftp_pending + f.n_sftp_failed + f.n_deferred > 0
       THEN 'delivering'
@@ -149,14 +156,17 @@ SELECT *,
       THEN 'stuck in parsing > 2h'
     WHEN status = 'parsed' AND completed_at < current_timestamp() - INTERVAL 12 HOURS
       THEN 'parsed but never split (> 12h)'
+    -- Before the generic 24h arm, or it would shadow this more specific label.
+    WHEN sftp_delivery_status = 'pending' AND archived_path IS NULL
+         AND completed_at < current_timestamp() - INTERVAL 2 HOURS
+      THEN 'split but not archived (crash between passes?)'
     WHEN sftp_delivery_status = 'pending'
          AND completed_at < current_timestamp() - INTERVAL 24 HOURS
       THEN 'awaiting sftp > 24h'
     WHEN needs_review AND sftp_delivery_status IS NULL
       THEN CONCAT('needs review (', COALESCE(boundary_source, '?'), ') — delivery blocked')
-    WHEN sftp_delivery_status = 'pending' AND archived_path IS NULL
-         AND completed_at < current_timestamp() - INTERVAL 2 HOURS
-      THEN 'split but not archived (crash between passes?)'
+    WHEN status = 'pending' AND created_at < current_timestamp() - INTERVAL 2 HOURS
+      THEN 'stuck in pending > 2h (never picked up by parse)'
   END AS stuck_reason
 FROM v_file_status
 WHERE
@@ -164,8 +174,11 @@ WHERE
   OR sftp_delivery_status IN ('failed', 'deferred')
   OR (status = 'parsing' AND started_at < current_timestamp() - INTERVAL 2 HOURS)
   OR (status = 'parsed' AND completed_at < current_timestamp() - INTERVAL 12 HOURS)
+  OR (sftp_delivery_status = 'pending' AND archived_path IS NULL
+      AND completed_at < current_timestamp() - INTERVAL 2 HOURS)
   OR (sftp_delivery_status = 'pending' AND completed_at < current_timestamp() - INTERVAL 24 HOURS)
-  OR (needs_review AND sftp_delivery_status IS NULL);
+  OR (needs_review AND sftp_delivery_status IS NULL)
+  OR (status = 'pending' AND created_at < current_timestamp() - INTERVAL 2 HOURS);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- v_sftp_board — delivery completeness per (day_id, folder_id).

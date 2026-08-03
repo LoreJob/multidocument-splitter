@@ -1,19 +1,25 @@
 // Dashboard — fetch aggregate stats, render monochrome cards, export PNG/HTML.
 
+// Same escaping discipline as control_tower.js: every server-provided value
+// goes through esc() before landing in innerHTML (and from there into the
+// exported standalone HTML).
+const esc = (s) =>
+  String(s ?? "").replace(/[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const pct = (x) => `${Math.round((x || 0) * 100)}%`;
 const num = (x) => (x == null ? "—" : x);
 
 function statCard(val, label, sub, wide = false) {
   return `<div class="stat${wide ? " wide" : ""}">
-    <span class="s-val">${val}</span>
-    <span class="s-lbl">${label}</span>
-    ${sub ? `<span class="s-sub">${sub}</span>` : ""}
+    <span class="s-val">${esc(num(val))}</span>
+    <span class="s-lbl">${esc(label)}</span>
+    ${sub ? `<span class="s-sub">${esc(sub)}</span>` : ""}
   </div>`;
 }
 
 function bar(label, value) {
   return `<div class="stat wide">
-    <span class="s-lbl">${label}</span>
+    <span class="s-lbl">${esc(label)}</span>
     <span class="s-val">${pct(value)}</span>
     <div class="bar"><span style="width:${pct(value)}"></span></div>
   </div>`;
@@ -22,19 +28,19 @@ function bar(label, value) {
 function renderGroup(title, s) {
   if (!s || s.n_annotated === 0) {
     return `<div class="dash-group">
-      <div class="group-heading">${title}</div>
+      <div class="group-heading">${esc(title)}</div>
       <p class="muted">No PDFs in this view yet.</p>
     </div>`;
   }
   return `<div class="dash-group">
-    <div class="group-heading">${title} <span class="group-count">${s.n_annotated} PDFs</span></div>
+    <div class="group-heading">${esc(title)} <span class="group-count">${esc(s.n_annotated)} PDFs</span></div>
 
     <div class="stat-section-title">Coverage</div>
     <div class="stat-grid">
-      ${statCard(s.n_annotated, "PDFs annotated", `${s.n_gt_multidoc} multi-doc · ${s.n_gt_single} single-doc`)}
-      ${statCard(s.n_with_model, "Compared vs model", s.n_no_model ? `${s.n_no_model} without model yet` : "all have a model split")}
-      ${statCard(s.n_exact, "Exact split matches", `of ${s.n_with_model} compared`)}
-      ${statCard(s.n_multidoc_correct, "Multidoc classified OK", `of ${s.n_with_model} compared`)}
+      ${statCard(s.n_annotated, "PDFs annotated", `${num(s.n_gt_multidoc)} multi-doc · ${num(s.n_gt_single)} single-doc`)}
+      ${statCard(s.n_with_model, "Compared vs model", s.n_no_model ? `${num(s.n_no_model)} without model yet` : "all have a model split")}
+      ${statCard(s.n_exact, "Exact split matches", `of ${num(s.n_with_model)} compared`)}
+      ${statCard(s.n_multidoc_correct, "Multidoc classified OK", `of ${num(s.n_with_model)} compared`)}
     </div>
 
     <div class="stat-section-title">Rates</div>
@@ -59,7 +65,7 @@ async function load() {
   const data = await res.json();
   if (data.error) {
     document.getElementById("dash-content").innerHTML =
-      `<p class="muted">Error: ${data.error}</p>`;
+      `<p class="muted">Error: ${esc(data.error)}</p>`;
     return;
   }
   const all = data.all;

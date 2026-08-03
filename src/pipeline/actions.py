@@ -92,12 +92,19 @@ def retry_sftp(day_id: str, filename: str) -> str:
 
 
 def mark_manual(day_id: str, filename: str) -> str:
-    """Terminal state: handled outside the pipeline."""
+    """Terminal state: handled outside the pipeline.
+
+    Guarded: a DELIVERED file must never be hijacked into the manual flow —
+    flipping it would put it in the manual worklist, and a manual save then
+    DELETEs its real split_results row. One mis-click in the bulk Errors-tab
+    flow was enough to corrupt a delivered file's record."""
     sql = get_sql()
     sql.execute(
         f"""UPDATE {_LOG}
             SET status = 'manual'
-            WHERE day_id = :day AND filename = :f""",
+            WHERE day_id = :day AND filename = :f
+              AND (sftp_delivery_status IS NULL
+                   OR sftp_delivery_status <> 'delivered')""",
         parameters=[sql.str_param("day", day_id), sql.str_param("f", filename)],
     )
     _log_event(sql, day_id, "marked_manual", filename, "handled manually")

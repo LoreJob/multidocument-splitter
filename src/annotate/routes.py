@@ -19,13 +19,36 @@ Routes (mounted at /api/annotate)
 """
 from __future__ import annotations
 
-from flask import Blueprint, Response, current_app, jsonify, request
+from flask import Blueprint, Response, jsonify, request
 
 from ..core.auth import actor
-from ..core.http import day_id_arg, valid_name
+from ..core.http import day_id_arg, internal_error, valid_name
 from . import annotation, manual
 
 bp = Blueprint("annotate", __name__, url_prefix="/api/annotate")
+
+
+def _to_int_or_none(v) -> int | None:
+    """int(v) but 400-friendly: None instead of an uncaught ValueError → 500."""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _validated_starts(raw, total_pages: int) -> list[int] | None:
+    """predicted_starts as sorted unique ints in 1..total_pages, else None.
+
+    Out-of-range pages are REJECTED, not silently dropped: an annotator
+    marking page 12 on a 10-page document must hear about it, otherwise the
+    boundary just vanishes from the saved ground truth."""
+    try:
+        starts = sorted({int(x) for x in raw})
+    except (TypeError, ValueError):
+        return None
+    if any(s < 1 or s > total_pages for s in starts):
+        return None
+    return starts
 
 
 @bp.get("/worklist")
@@ -35,9 +58,8 @@ def worklist():
         return jsonify({"error": "day_id query parameter required"}), 400
     try:
         return jsonify(annotation.build_worklist(day))
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("worklist failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("worklist")
 
 
 @bp.get("/file/<name>")
@@ -60,9 +82,8 @@ def file_detail(name: str):
             "folder_id": name.split("_")[0],
             "ground_truth": gt,
         })
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("file_detail failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("file_detail")
 
 
 @bp.get("/page/<name>/<int:n>")
@@ -79,18 +100,16 @@ def page_image(name: str, n: int):
         resp = Response(jpeg, mimetype="image/jpeg")
         resp.headers["Cache-Control"] = "public, max-age=3600"
         return resp
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("page_image failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("page_image")
 
 
 @bp.get("/stats")
 def stats():
     try:
         return jsonify(annotation.get_eval_stats())
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("stats failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("stats")
 
 
 @bp.post("/save")
@@ -113,16 +132,26 @@ def save():
 
         # total_pages / folder_id: trust the request (from the loaded PDF), fall
         # back to the model row when available.
-        total_pages = int(body.get("total_pages") or (model or {}).get("total_pages") or 0)
-        if total_pages <= 0:
+        total_pages = _to_int_or_none(body.get("total_pages")
+                                      or (model or {}).get("total_pages") or 0)
+        if not total_pages or total_pages <= 0:
             return jsonify({"error": "total_pages missing or invalid"}), 400
+        gt_starts = _validated_starts(starts, total_pages)
+        if gt_starts is None:
+            return jsonify({"error": "predicted_starts must be integers "
+                                     f"between 1 and {total_pages}"}), 400
         folder_id = body.get("folder_id") or (model or {}).get("folder_id")
+        # folder_id becomes split_results.folder_id and, downstream, a path
+        # segment (output/{day}/{folder_id} + the SFTP remote folder) — same
+        # charset rule as filenames.
+        if folder_id is not None and not valid_name(str(folder_id)):
+            return jsonify({"error": "invalid folder_id"}), 400
 
         payload = annotation.build_gt_payload(
             filename=name,
             folder_id=folder_id,
             total_pages=total_pages,
-            gt_starts=[int(x) for x in starts],
+            gt_starts=gt_starts,
             is_multidoc=is_multidoc,
             annotator=actor(),
             day_id=day,
@@ -136,9 +165,8 @@ def save():
             "ground_truth": payload,
             "evaluation": metrics,
         })
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("save failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("save")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -152,9 +180,8 @@ def manual_worklist():
         return jsonify({"error": "day_id query parameter required"}), 400
     try:
         return jsonify(manual.build_worklist(day))
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("manual worklist failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("manual worklist")
 
 
 @bp.get("/manual/file/<name>")
@@ -175,9 +202,8 @@ def manual_file_detail(name: str):
             "folder_id": name.split("_")[0],
             "ground_truth": gt,
         })
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("manual file_detail failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("manual file_detail")
 
 
 @bp.get("/manual/page/<name>/<int:n>")
@@ -194,9 +220,8 @@ def manual_page_image(name: str, n: int):
         resp = Response(jpeg, mimetype="image/jpeg")
         resp.headers["Cache-Control"] = "public, max-age=3600"
         return resp
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("manual page_image failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("manual page_image")
 
 
 @bp.post("/manual/save")
@@ -215,21 +240,26 @@ def manual_save():
         return jsonify({"error": "predicted_starts must be a non-empty list"}), 400
 
     try:
-        total_pages = int(body.get("total_pages") or 0)
-        if total_pages <= 0:
+        total_pages = _to_int_or_none(body.get("total_pages") or 0)
+        if not total_pages or total_pages <= 0:
             return jsonify({"error": "total_pages missing or invalid"}), 400
+        gt_starts = _validated_starts(starts, total_pages)
+        if gt_starts is None:
+            return jsonify({"error": "predicted_starts must be integers "
+                                     f"between 1 and {total_pages}"}), 400
         folder_id = body.get("folder_id") or name.split("_")[0]
+        if not valid_name(str(folder_id)):
+            return jsonify({"error": "invalid folder_id"}), 400
 
         res = manual.save_manual(
             day_id=day,
             filename=name,
-            starts=[int(x) for x in starts],
+            starts=gt_starts,
             is_multidoc=is_multidoc,
             total_pages=total_pages,
             folder_id=folder_id,
             annotator=actor(),
         )
         return jsonify(res)
-    except Exception as e:  # noqa: BLE001
-        current_app.logger.exception("manual save failed")
-        return jsonify({"error": str(e)}), 500
+    except Exception:  # noqa: BLE001
+        return internal_error("manual save")

@@ -142,10 +142,13 @@ print(f"{'═' * 60}")
 #     print("   Riesegui dal Cell 6 (GCS Primary Pass) per rigenerare gcs_parsed.")
 
 # # ── Ripristina temp views da UC tables (serve per Cell 9 verification) ──
-# spark.sql(f"SELECT * FROM `{CATALOG}`.`{SCHEMA}`.`page_signals`").createOrReplaceTempView("page_signals")
+# # FILTRATE per day_id: le temp view normali contengono SOLO il batch corrente;
+# # ripristinarle dall'intera tabella mescolerebbe tutti i batch nei pass
+# # chunked/verification e nella write finale.
+# spark.sql(f"SELECT * FROM `{CATALOG}`.`{SCHEMA}`.`page_signals` WHERE day_id = '{DAY_ID}'").createOrReplaceTempView("page_signals")
 # print(f"\u2713 page_signals temp view ripristinata")
 
-# spark.sql(f"SELECT * FROM `{CATALOG}`.`{SCHEMA}`.`package_summaries`").createOrReplaceTempView("package_summaries")
+# spark.sql(f"SELECT * FROM `{CATALOG}`.`{SCHEMA}`.`package_summaries` WHERE day_id = '{DAY_ID}'").createOrReplaceTempView("package_summaries")
 # print(f"\u2713 package_summaries temp view ripristinata")
 
 # print(f"\n\u2713 Recovery completata \u2014 puoi rieseguire da Cell 8")
@@ -628,6 +631,10 @@ df_large_pdfs = spark.sql(f"""
 """)
 n_large = df_large_pdfs.count()
 
+# File con chunk falliti anche dopo il retry di fallback: la write finale li
+# marca needs_review (i boundary del range fallito potrebbero mancare).
+chunk_partial_files = set()
+
 if n_large == 0:
     print(f"No large PDFs (>{MAX_PAGES_SINGLE_CALL} pages) — chunked processing skipped.")
 else:
@@ -717,6 +724,97 @@ else:
     # ── Materializzazione: risolve raw_response nel piano lazy prima della union ──
     df_chunk_parsed.write.format("delta").mode("overwrite").save(f"{TMP_BASE}/chunk_parsed")
     df_chunk_parsed = spark.read.format("delta").load(f"{TMP_BASE}/chunk_parsed")
+
+    # ── Retry dei chunk falliti con il modello di fallback ──────────────────
+    # Il path single-call ha il fallback Maverick; il path chunked non lo
+    # aveva: un chunk fallito spariva in silenzio e i boundary del suo range
+    # di pagine venivano persi senza alcun flag. Ora: retry con il fallback,
+    # e se anche quello fallisce il file finisce needs_review.
+    df_chunk_failed = df_chunk_parsed.filter(
+        (col("error_message").isNotNull()) | (col("chunk_starts").isNull())
+    )
+    n_chunk_failed = df_chunk_failed.count()
+    if n_chunk_failed > 0:
+        print(f"  ⚠️  {n_chunk_failed} chunk falliti con {PRIMARY_MODEL} — retry con {FALLBACK_MODEL}")
+        df_chunk_failed.select("filename", "chunk_idx") \
+            .createOrReplaceTempView("failed_chunk_keys")
+        spark.sql("""
+            SELECT p.* FROM chunk_prompts p
+            JOIN failed_chunk_keys k
+              ON p.filename = k.filename AND p.chunk_idx = k.chunk_idx
+        """).createOrReplaceTempView("chunk_retry_prompts")
+
+        for bucket, max_tokens in [("S", MAX_TOKENS_S), ("M", MAX_TOKENS_M), ("L", MAX_TOKENS_L)]:
+            spark.sql(f"""
+                SELECT filename, total_pages, chunk_idx, chunk_start, chunk_end, token_bucket,
+                  ai_query('{FALLBACK_MODEL}', prompt,
+                    failOnError => false,
+                    modelParameters => named_struct('temperature', 0.1, 'max_tokens', {max_tokens})
+                  ) AS llm_result
+                FROM chunk_retry_prompts WHERE token_bucket = '{bucket}'
+            """).createOrReplaceTempView(f"chunk_retry_raw_{bucket}")
+
+        df_chunk_retry = spark.sql(
+            "SELECT * FROM chunk_retry_raw_S UNION ALL "
+            "SELECT * FROM chunk_retry_raw_M UNION ALL "
+            "SELECT * FROM chunk_retry_raw_L")
+        df_chunk_retry = (
+            df_chunk_retry
+            .withColumn("raw_response", col("llm_result.result"))
+            .withColumn("error_message", col("llm_result.errorMessage"))
+            .drop("llm_result")
+            .withColumn("chunk_starts", parse_gcs_response(col("raw_response"), col("total_pages")))
+        )
+        # Materializzazione: fissa le risposte retry prima di union/filtri
+        df_chunk_retry.write.format("delta").mode("overwrite").save(f"{TMP_BASE}/chunk_retry")
+        df_chunk_retry = spark.read.format("delta").load(f"{TMP_BASE}/chunk_retry")
+
+        # Audit: log dei retry su gcs_llm_responses come gli altri pass
+        df_chunk_retry.select(
+            col("filename"),
+            lit("chunk_retry_fallback").alias("stage"),
+            lit(FALLBACK_MODEL).alias("model_used"),
+            col("token_bucket").alias("prompt_token_bucket"),
+            col("raw_response"),
+            col("error_message"),
+            col("chunk_starts").alias("parsed_starts"),
+            lit(True).alias("is_fallback"),
+            current_timestamp().alias("processing_timestamp"),
+            lit(RUN_ID).alias("run_id"),
+            lit(DAY_ID).alias("day_id"),
+        ).write.format("delta").mode("append").saveAsTable(
+            f"`{CATALOG}`.`{SCHEMA}`.`gcs_llm_responses`"
+        )
+
+        df_retry_ok = df_chunk_retry.filter(
+            (col("error_message").isNull()) & (col("chunk_starts").isNotNull())
+        ).drop("token_bucket")
+        df_retry_failed = df_chunk_retry.filter(
+            (col("error_message").isNotNull()) | (col("chunk_starts").isNull())
+        )
+
+        # Sostituisci i chunk falliti con i retry riusciti
+        df_chunk_parsed = (
+            df_chunk_parsed
+            .join(df_chunk_failed.select("filename", "chunk_idx"),
+                  on=["filename", "chunk_idx"], how="left_anti")
+            .unionByName(df_retry_ok)
+        )
+
+        chunk_partial_files = {
+            r["filename"]
+            for r in df_retry_failed.select("filename").distinct().collect()
+        }
+        n_retry_ok = df_retry_ok.count()
+        print(f"  Retry fallback: {n_retry_ok} chunk recuperati, "
+              f"{n_chunk_failed - n_retry_ok} ancora falliti "
+              f"({len(chunk_partial_files)} file → needs_review)")
+        for fname in sorted(chunk_partial_files):
+            events.log("needs_review", filename=fname,
+                       detail="chunk LLM calls failed even after fallback retry — "
+                              "boundaries may be missing in the failed page range")
+        if chunk_partial_files:
+            events.flush()
 
     # Merge chunk boundaries per PDF
     from pyspark.sql.functions import explode, collect_set, sort_array, array_union, array as spark_array
@@ -909,9 +1007,17 @@ def apply_corrections(proposed: list, verify_response: str, total_pages: int) ->
     
     result = set([1] + list(proposed))
     for c in corrections:
-        action = c.get('action', '').lower()
-        from_p = c.get('from_page')
-        to_p = c.get('to_page')
+        # The LLM controls this shape: a non-dict element or a string page
+        # number ("to_page": "12") must skip the correction, not raise a
+        # TypeError inside the UDF and kill the whole write cell.
+        if not isinstance(c, dict):
+            continue
+        action = str(c.get('action', '')).lower()
+        try:
+            from_p = int(c['from_page']) if c.get('from_page') is not None else None
+            to_p = int(c['to_page']) if c.get('to_page') is not None else None
+        except (TypeError, ValueError):
+            continue
         if action == 'move':
             if from_p and from_p in result and from_p != 1:
                 result.discard(from_p)
@@ -965,7 +1071,7 @@ print(f"  Docs per PDF: avg={stats['avg_docs']:.1f}, max={stats['max_docs']}")
 
 # DBTITLE 1,Write split_results and update processing_log
 # ── Write final results to split_results UC table ──
-from pyspark.sql.functions import col, lit, size, current_timestamp, when
+from pyspark.sql.functions import col, lit, size, current_timestamp, when, coalesce
 
 # Determine model used per file
 df_model_info = spark.sql(f"""
@@ -981,6 +1087,14 @@ df_model_info = spark.sql(f"""
 # boundary_source per file (primary / fallback / chunked / ultimate_fallback)
 df_source = spark.sql("SELECT filename, boundary_source FROM gcs_parsed")
 
+# verification_applied per file: TRUE only when the file went through the
+# verification pass AND the verify call succeeded. Files that were never
+# verified (single-doc, no boundaries > 1) or whose verify call errored keep
+# their original boundaries — recording TRUE for them was a lie in the data.
+df_verified = spark.sql(
+    "SELECT filename, (verify_error IS NULL) AS verification_applied FROM corrections"
+)
+
 df_results = (
     spark.sql("SELECT filename, predicted_starts FROM final_boundaries")
     .join(
@@ -989,6 +1103,7 @@ df_results = (
     )
     .join(df_model_info, on="filename", how="left")
     .join(df_source, on="filename", how="left")
+    .join(df_verified, on="filename", how="left")
     .select(
         col("filename"),
         col("folder_id"),
@@ -998,11 +1113,14 @@ df_results = (
         when(col("fallback_used"), col("fallback_model"))
             .otherwise(col("primary_model")).alias("model_used"),
         col("fallback_used").alias("fallback_used"),
-        lit(True).alias("verification_applied"),
+        coalesce(col("verification_applied"), lit(False)).alias("verification_applied"),
         current_timestamp().alias("processing_timestamp"),
         lit(RUN_ID).alias("run_id"),
         lit(DAY_ID).alias("day_id"),
-        (col("boundary_source") == "ultimate_fallback").alias("needs_review"),
+        # needs_review: entrambi gli LLM falliti ([1] fallback) OPPURE file
+        # chunked con almeno un chunk fallito anche dopo il retry di fallback.
+        ((col("boundary_source") == "ultimate_fallback")
+         | col("filename").isin(list(chunk_partial_files))).alias("needs_review"),
         col("boundary_source"),
     )
 )

@@ -11,6 +11,10 @@ where an operator watches, annotates and drives all of that.
 Runs as a **Databricks App** (Flask, port 8000). Vanilla JS, no framework, no
 build step, no CDN. Light + dark theme.
 
+**Live in production** since 2026-07-21 against `sbx-logistics`.`multidocument-prod`.
+Batches delivered end to end so far: `20260721` (100 packages), `20260722` (100),
+`20260801` (1480 packages → 2871 split PDFs, 94 of them hand-annotated).
+
 > Until 2026-07-17 this was two apps — the annotator on :8000 and a control tower
 > on :8001, linked only by a `window.open()` to the annotator's root. Because the
 > annotator then picked its own batch, you could land on a different one than you
@@ -24,7 +28,7 @@ build step, no CDN. Light + dark theme.
 | **Batches** | every `inbox/{day_id}/` folder with its lifecycle badge and contextual actions |
 | **Live Flow** | animated funnel (inbox → parsed → predicted → ground truth → split → delivered), polls every 4s while a job runs; errors show as red counters on the failing stage |
 | **Annotation Gate** | sample progress, model-vs-GT metrics, unlocks delivery |
-| **Annotate** | the annotation UI — see below |
+| **Annotate** | the annotation UI, in two modes: **Sample** (scored) and **Manual** — see below |
 | **Errors** | every failure, with its reason and a requeue button |
 | **SFTP** | delivery board + deferred re-delivery to a different remote path |
 | **Review** | packages where both LLMs failed and would ship UNSPLIT — approve or requeue |
@@ -58,6 +62,33 @@ server-side at save time, and metrics appear only *after* the operator commits.
 Pages are rendered server-side to JPEG by PyMuPDF and lazy-loaded as they scroll
 into view — no PDF.js, no CDN. Unsaved marks are guarded against tab switches,
 batch changes and page unload.
+
+## Manual mode — rescuing files the pipeline can't handle
+
+A file that fails `ai_parse_document` never gets a prediction, so it is never
+sampled and would never ship. Mark it **manual** in the Errors tab and it appears
+in the Annotate tab's **Manual** mode, rendered straight from the raw PDF in
+`inbox/` (PyMuPDF renders fine even when the LLM parse failed). Saving there
+writes the ground-truth JSON **and** a `split_results` row with
+`boundary_source='manual'`, which is what makes the file deliverable. No
+`evaluation_results` row is written — manual boundaries are never scored, so
+they cannot flatter or dent the model's metrics.
+
+`status='manual'` therefore means two different things, and only one of them ships:
+
+| | marked manual in Errors, **not** annotated | marked manual **and** hand-annotated |
+|---|---|---|
+| `boundary_source='manual'` row | no | yes |
+| split by `nb_pdf_split` | no | yes |
+| uploaded by `nb_sftp_upload` | no | yes |
+| meaning | handled outside the pipeline | deliverable, just not model-predicted |
+
+Everything downstream keys off `boundary_source`, never off the status alone.
+A hand-annotated file keeps `status='manual'` all the way through to
+`delivered` — do not flip it to `done` to force a delivery, it only removes the
+file from the manual worklist. Files marked manual also drop out of the
+annotation gate's sample: their PDF stays in `validation/` (marking cannot
+delete from a volume), so counting them would deadlock delivery at `409`.
 
 ## `/dashboard`
 
@@ -124,6 +155,8 @@ src/pipeline/   routes.py   /api/*  — batches, jobs, gate, errors, sftp, revie
 src/annotate/   routes.py   /api/annotate/* — worklist, page JPEGs, save
                 annotation.py  worklist, model lookup, page render, GT, eval
                 evaluation.py  boundary metrics (pure, unit-tested)
+                manual.py      manual mode: GT + the boundary_source='manual'
+                               split row that makes a file deliverable
 templates/      control_tower.html   the SPA shell (8 tabs)
                 dashboard.html       standalone export page
 static/         css/control_tower.css   one theme, light + dark
@@ -157,8 +190,14 @@ export DATABRICKS_WAREHOUSE_ID=<warehouse-id>
 python app.py            # http://127.0.0.1:8000
 ```
 
-`python -m pytest tests/` (or `python tests/test_evaluation.py`) covers the
-boundary metrics.
+`python -m pytest tests/` covers the boundary metrics (`test_evaluation`), the
+manual path and the annotation gate (`test_manual`), and the page render cache
+(`test_render_cache`). Each file also runs standalone: `python tests/test_manual.py`.
+
+**After changing anything under `src/`, redeploy the app** — re-syncing the
+notebooks does not cover the Flask side. After changing `sql/views.sql`, re-run
+it against the warehouse: the views are the one definition shared by the app and
+`nb_pipeline_status`.
 
 ## Notes / future work
 

@@ -63,3 +63,22 @@ Nothing hardcoded — bind by resource, not id:
   UI and the flow tab; no "not set" toast.
 - Smoke: small batch in `inbox/{day_id}/`, `sample_pct=100`,
   ingest → annotate → gate unlocks → deliver.
+
+Done: steps 1-3 completed 2026-07-21, verified by three batches delivered end to
+end (`20260721`, `20260722`, `20260801`).
+
+## 4. Keeping the workspace in sync (every change after the first deploy)
+
+The three surfaces move independently — a merged PR changes none of them by itself.
+
+| Changed | What to do | Who picks it up |
+|---|---|---|
+| `algorithm-prod/*.py` | Git folder → **Pull** (or `databricks workspace import-dir`) | the next job run |
+| `src/`, `templates/`, `static/`, `app.yaml` | redeploy the app (`databricks apps deploy`) | the running app |
+| `sql/views.sql` | re-run the whole file against the warehouse — every statement is `CREATE OR REPLACE VIEW`, so it is safe to re-run and touches no data | app **and** `nb_pipeline_status`, they share the views |
+| `sql/ddl_*.sql` | run only in a new environment — the tables already exist | — |
+
+Two traps: a notebook fix looks deployed after a merge but is not until the Pull,
+and the app is *not* covered by the Pull. If a change spans both — as the
+2026-08-03 manual-delivery fix did — do both, or the notebooks and the app will
+disagree about which files are deliverable.

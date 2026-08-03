@@ -178,6 +178,12 @@ SELECT *,
   CASE
     WHEN status = 'error'
       THEN CONCAT('error at ', COALESCE(error_stage, '?'), ': ', COALESCE(error_message, ''))
+    -- Oversized: il parser LLM non li tocca (>100MB) e il PDF sta in
+    -- oversized/{day}/. Vanno annotati a mano dal tab Manual come i parse
+    -- failure. Gemello di sql/views.sql — cambiare sempre entrambi.
+    WHEN status = 'skipped'
+      THEN CONCAT('oversized (', COALESCE(ROUND(file_size_mb)::text, '?'),
+                  ' MB) — annotare a mano dal tab Manual')
     WHEN sftp_delivery_status = 'failed'
       THEN CONCAT('sftp failed: ', COALESCE(sftp_delivery_error, ''))
     WHEN sftp_delivery_status = 'deferred'
@@ -200,6 +206,7 @@ SELECT *,
 FROM laplace.v_file_status
 WHERE
      status = 'error'
+  OR status = 'skipped'
   OR sftp_delivery_status IN ('failed', 'deferred')
   OR (status = 'parsing' AND started_at < now() - interval '2 hours')
   OR (status = 'parsed' AND completed_at < now() - interval '12 hours')

@@ -17,6 +17,16 @@ _SPLIT = config.fq("split_results")
 _SIGNALS = config.fq("page_signals")
 _SUMMARIES = config.fq("package_summaries")
 
+# A delivered file must never be hijacked into the manual flow: it would land in
+# the manual worklist and a manual save would DELETE its real split_results row.
+# Defined once — the single-file and bulk paths must not drift apart.
+_NOT_DELIVERED = ("(sftp_delivery_status IS NULL "
+                  "OR sftp_delivery_status <> 'delivered')")
+
+# Bound parameters per statement stay well inside the StatementExecution limit;
+# a bigger selection is split into chunks, each still costing 3 round trips.
+_BULK_CHUNK = 200
+
 
 def _log_event(sql, day_id: str, event_type: str, filename: str | None,
                detail: str | None = None):
@@ -103,8 +113,7 @@ def mark_manual(day_id: str, filename: str) -> str:
         f"""UPDATE {_LOG}
             SET status = 'manual'
             WHERE day_id = :day AND filename = :f
-              AND (sftp_delivery_status IS NULL
-                   OR sftp_delivery_status <> 'delivered')""",
+              AND {_NOT_DELIVERED}""",
         parameters=[sql.str_param("day", day_id), sql.str_param("f", filename)],
     )
     _log_event(sql, day_id, "marked_manual", filename, "handled manually")
@@ -112,11 +121,89 @@ def mark_manual(day_id: str, filename: str) -> str:
 
 
 def mark_manual_bulk(day_id: str, filenames: list[str]) -> int:
-    """Mark several files manual in one call. Reuses mark_manual so each file
-    keeps its own 'marked_manual' event. Returns the number of files targeted."""
-    for f in filenames:
-        mark_manual(day_id, f)
-    return len(filenames)
+    """Mark several files manual in 3 statements per chunk, not 2 per file.
+
+    Was a loop over mark_manual: 2 round trips × N files, and at ~600 ms per
+    statement the 94-file batch of 20260801 took over a minute and a half of
+    wall clock. Now one SELECT (which files are actually eligible) + one
+    UPDATE + one multi-row event INSERT, so any selection up to _BULK_CHUNK
+    costs three round trips.
+
+    Each file still gets its own 'marked_manual' event — the audit trail keeps
+    exactly the shape it had. Better than before, in fact: files skipped by the
+    delivered-guard no longer get an event claiming they were marked, and the
+    returned count is the number of files actually flipped rather than the
+    number requested.
+    """
+    total = 0
+    sql = get_sql()
+    for i in range(0, len(filenames), _BULK_CHUNK):
+        total += _mark_manual_chunk(sql, day_id, filenames[i:i + _BULK_CHUNK])
+    return total
+
+
+def _mark_manual_chunk(sql, day_id: str, chunk: list[str]) -> int:
+    """One chunk: resolve eligible files, flip them, log one event each."""
+    if not chunk:
+        return 0
+    params = [sql.str_param("day", day_id)]
+    placeholders = []
+    for i, f in enumerate(chunk):
+        params.append(sql.str_param(f"f{i}", f))
+        placeholders.append(f":f{i}")
+    in_list = ", ".join(placeholders)
+
+    # Which of the requested files may actually be marked? Resolving first keeps
+    # the event rows truthful and gives an exact count without relying on the
+    # driver reporting affected rows.
+    rows = sql.execute(
+        f"""SELECT filename FROM {_LOG}
+            WHERE day_id = :day AND filename IN ({in_list})
+              AND {_NOT_DELIVERED}""",
+        parameters=params,
+    )
+    eligible = sorted({r["filename"] for r in rows})
+    if not eligible:
+        return 0
+
+    sql.execute(
+        f"""UPDATE {_LOG}
+            SET status = 'manual'
+            WHERE day_id = :day AND filename IN ({in_list})
+              AND {_NOT_DELIVERED}""",
+        parameters=params,
+    )
+    _log_events_bulk(sql, day_id, "marked_manual", eligible, "handled manually")
+    return len(eligible)
+
+
+def _log_events_bulk(sql, day_id: str, event_type: str, filenames: list[str],
+                     detail: str | None = None) -> None:
+    """One INSERT with a VALUES tuple per file — same rows N _log_event calls
+    would write, one round trip instead of N."""
+    if not filenames:
+        return
+    params = [
+        sql.str_param("day", day_id),
+        sql.str_param("etype", event_type),
+        sql.str_param("actor", actor()),
+        sql.str_param("detail", detail or ""),
+    ]
+    tuples = []
+    for i, f in enumerate(filenames):
+        params.append(sql.str_param(f"eid{i}", str(uuid.uuid4())))
+        params.append(sql.str_param(f"ef{i}", f))
+        tuples.append(
+            f"(:eid{i}, NULL, :day, 'dashboard', :etype, :ef{i}, NULL, "
+            f"NULL, NULL, :detail, NULL, :actor, current_timestamp())"
+        )
+    sql.execute(
+        f"""INSERT INTO {_EVENTS}
+            (event_id, run_id, day_id, stage, event_type, filename, folder_id,
+             old_status, new_status, detail, error_message, actor, event_ts)
+            VALUES {", ".join(tuples)}""",
+        parameters=params,
+    )
 
 
 def approve_review(day_id: str, filename: str) -> str:

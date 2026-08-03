@@ -98,14 +98,27 @@ df_candidates = (
     .join(df_already_split, on="filename", how="left_anti")
 )
 
-# Pre-load available ground truth for this batch (dated volume)
+# Pre-load available ground truth for this batch (dated volume).
+# Per-file try: ONE corrupt/truncated GT JSON must not kill the whole delivery
+# run — the file falls back to the model prediction (or stays blocked if
+# needs_review), and the error is on the audit trail.
 gt_by_filename = {}
+gt_load_errors = []
 if os.path.exists(GT_PATH):
     for _f in os.listdir(GT_PATH):
         if _f.endswith(".json"):
             _name = os.path.splitext(_f)[0]
-            with open(f"{GT_PATH}/{_f}") as _fp:
-                gt_by_filename[_name] = json.load(_fp)
+            try:
+                with open(f"{GT_PATH}/{_f}") as _fp:
+                    gt_by_filename[_name] = json.load(_fp)
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError) as _e:
+                gt_load_errors.append(_name)
+                events.log("error", filename=_name,
+                           error_message=f"unreadable ground-truth JSON: {str(_e)[:300]}",
+                           detail=f"{GT_PATH}/{_f} ignored — falling back to model prediction")
+                print(f"  ⚠️  GT illeggibile, ignorata: {_f} ({str(_e)[:100]})")
+if gt_load_errors:
+    events.flush()
 
 # needs_review gate: blocked unless ground truth exists (GT overrides the model
 # anyway) or the review was approved in the dashboard (needs_review=false).

@@ -83,7 +83,32 @@ SELECT
   -- 'delivered' in v_batch_status, altrimenti un batch consegnato con un file
   -- bloccato regredisce a 'predicted' per sempre.
   SUM(CASE WHEN needs_review AND sftp_delivery_status IS NULL
-           THEN 1 ELSE 0 END)                                       AS n_review_blocked
+           THEN 1 ELSE 0 END)                                       AS n_review_blocked,
+  -- ── corsia manuale del Live Flow ────────────────────────────────────────
+  -- Le prime due sono TOTALI DI BATCH, non code: contano su file_size_mb ed
+  -- error_stage, che mark-manual non tocca (cambia solo lo status). Contarle
+  -- sullo status le farebbe svuotare man mano che i file vengono presi in
+  -- carico, e nel diagramma la somma oversized+falliti=manuali non tornerebbe
+  -- più. retry_parse azzera error_stage, quindi un file recuperato esce.
+  -- 100 = MAX_FILE_SIZE_MB in algorithm-prod/nb_parse_documents.py.
+  SUM(CASE WHEN file_size_mb >= 100 THEN 1 ELSE 0 END)              AS n_oversized,
+  SUM(CASE WHEN error_stage = 'parsing' THEN 1 ELSE 0 END)          AS n_failed_parse,
+  -- Unione: tutto ciò che richiede (o ha richiesto) lavoro umano. Lo status
+  -- 'manual' è nell'OR perché un file può essere marcato manual dal tab Errors
+  -- per motivi diversi da taglia/parse: senza, sparirebbe dal carico.
+  -- boundary_source='manual' è nell'OR per la stessa ragione per cui è il
+  -- discriminante di ogni consumer della consegna: è l'UNICA traccia che
+  -- sopravvive a un UPDATE a mano dello status. Su 20260801 i 94 file
+  -- annotati a mano hanno status='done' (forzato il 2026-08-03) ed
+  -- error_stage NULL: senza questo ramo il carico manuale del batch più
+  -- grosso risulterebbe zero.
+  SUM(CASE WHEN file_size_mb >= 100 OR error_stage = 'parsing'
+                OR status = 'manual' OR boundary_source = 'manual'
+           THEN 1 ELSE 0 END)                                       AS n_manual_total,
+  -- Confini davvero disegnati a mano. Distinto da n_manual_deliverable, che
+  -- richiede ANCHE status='manual' ed entra nel CASE di v_batch_status: quello
+  -- non si tocca, o si sposta la soglia di 'delivered'.
+  SUM(CASE WHEN boundary_source = 'manual' THEN 1 ELSE 0 END)       AS n_manual_noted
 FROM v_file_status
 GROUP BY day_id;
 

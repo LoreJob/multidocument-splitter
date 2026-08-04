@@ -21,6 +21,13 @@
   --critical:    #d03b3b;
   /* ordinal funnel ramp (blue steps 250→650, surface-safe) */
   --f1: #86b6ef; --f2: #5598e7; --f3: #3987e5; --f4: #256abf; --f5: #1c5cab; --f6: #104281;
+  /* manual lane — a SECOND TRACK, not a status: these files are handled by a
+     human, which is a route through the pipeline, not a health state. Kept off
+     the status palette on purpose so it never reads as an error. */
+  --manual:      #a8691f;
+  --manual-2:    #c9873a;
+  --wire:        #d5d4cc;
+  --wire-lane:   #dcc3a3;
   /* document-boundary marks — track the accent, never the status palette: a
      page boundary is an action state, not a status, and must not read as one */
   --mark-line:    #2a78d6;
@@ -41,6 +48,10 @@
     --accent:    #3987e5;
     --accent-2:  #199e70;
     --f1: #184f95; --f2: #1c5cab; --f3: #256abf; --f4: #2a78d6; --f5: #3987e5; --f6: #5598e7;
+    --manual:      #c9873a;
+    --manual-2:    #e0a463;
+    --wire:        #34342f;
+    --wire-lane:   #5a4630;
     --mark-line:    #5598e7;
     --mark-overlay: rgba(85, 152, 231, 0.14);
   }
@@ -142,20 +153,27 @@ body {
 .batch-actions { display: flex; gap: 8px; }
 
 /* ── Funnel (live flow) ──────────────────────────────────────────────── */
+/* Two rows: the automated main track, and the manual lane underneath. The
+   connectors are an SVG layer measured from the real bubble rects (see
+   buildWires in control_tower.js) — CSS pseudo-elements cannot draw the drops
+   into the lane or the diagonal rejoin. */
 .funnel {
-  display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  gap: 0;
+  position: relative;
   background: var(--surface);
   border: 1px solid var(--grid); border-radius: 10px;
   padding: 22px 14px 18px;
   overflow-x: auto;
 }
-.stage { position: relative; text-align: center; padding: 0 8px; }
-.stage + .stage::before {         /* connector line between stages */
-  content: ""; position: absolute; left: -34px; top: 34px;
-  width: 68px; height: 2px; background: var(--grid);
+.funnel .wires { position: absolute; left: 0; top: 0; pointer-events: none; z-index: 0; }
+.funnel .wire { fill: none; stroke: var(--wire); stroke-width: 2; }
+.funnel .wire.lane { stroke: var(--wire-lane); stroke-dasharray: 5 4; }
+.frow {
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 0;
+  position: relative; z-index: 1; min-width: 760px;
 }
+.frow.lane { margin-top: 48px; }
+
+.stage { position: relative; text-align: center; padding: 0 8px; }
 .stage .bubble {
   width: 68px; height: 68px; margin: 0 auto; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
@@ -166,33 +184,42 @@ body {
 }
 .stage.bumped .bubble { transform: scale(1.12); }
 .stage .lbl { margin-top: 8px; font-size: 12px; color: var(--ink-2); font-weight: 600; }
-.stage .sub { font-size: 11px; color: var(--muted); }
-.stage .errs {
-  display: inline-flex; align-items: center; gap: 4px;
-  margin-top: 4px; font-size: 11.5px; font-weight: 700; color: var(--critical);
-}
-/* ordinal ramp across the six stages */
-.stage:nth-child(1) .bubble { background: var(--f1); }
-.stage:nth-child(2) .bubble { background: var(--f2); }
-.stage:nth-child(3) .bubble { background: var(--f3); }
-.stage:nth-child(4) .bubble { background: var(--f4); }
-.stage:nth-child(5) .bubble { background: var(--f5); }
-.stage:nth-child(6) .bubble { background: var(--f6); }
+/* one short status line per stage — no subtitles */
+.stage .note { margin-top: 3px; font-size: 11px; color: var(--muted); min-height: 15px; }
+.stage .note .warn { color: var(--critical); font-weight: 700; }
+.stage .note .ok { color: var(--good); font-weight: 700; }
 
-/* flowing token animation while a job is active */
-.stage .flow-token {
-  position: absolute; top: 31px; left: -34px;
+/* ordinal ramp across the six main stages */
+.stage.m1 .bubble { background: var(--f1); }
+.stage.m2 .bubble { background: var(--f2); }
+.stage.m3 .bubble { background: var(--f3); }
+.stage.m4 .bubble { background: var(--f4); }
+.stage.m5 .bubble { background: var(--f5); }
+.stage.m6 .bubble { background: var(--f6); }
+
+/* manual lane — off the blue ramp so the two tracks never read as one */
+.stage.lane .bubble { background: var(--manual); width: 58px; height: 58px; font-size: 17px; }
+.stage.lane.soft .bubble { background: var(--manual-2); }
+.stage.lane .lbl { color: var(--manual); }
+
+/* Tokens travel along their connector's path. Only the segment matching the
+   current stage carries them, so the diagram shows WHERE the pipeline is. */
+.flow-token {
+  position: absolute; left: 0; top: 0; z-index: 2;
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--accent); opacity: 0;
+  offset-rotate: 0deg;
 }
-.funnel.running .stage.flowing .flow-token {
-  animation: flow 1.4s ease-in-out infinite;
-}
+.flow-token.on { animation: flow 1.5s linear infinite; }
 @keyframes flow {
-  0%   { opacity: 0; transform: translateX(0); }
-  15%  { opacity: 1; }
-  85%  { opacity: 1; }
-  100% { opacity: 0; transform: translateX(60px); }
+  0%   { offset-distance: 0%;   opacity: 0; }
+  12%  { opacity: 1; }
+  88%  { opacity: 1; }
+  100% { offset-distance: 100%; opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flow-token.on { animation: none; opacity: 0.9; }
+  .stage .bubble { transition: none; }
 }
 
 /* ── Event feed ──────────────────────────────────────────────────────── */

@@ -93,7 +93,10 @@ LEFT JOIN (
 WHERE l.rn = 1;
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- v_funnel — includes n_review_blocked (fix(audit)-lifecycle-regression).
+-- v_funnel — includes n_review_blocked (fix(audit)-lifecycle-regression) and
+-- the three Live Flow manual-lane columns. TWIN of v_funnel in sql/views.sql:
+-- the app reads this one when LAKEBASE_ENABLED, so a column added there and
+-- forgotten here shows up as an empty lane, not as an error.
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE OR REPLACE VIEW laplace.v_funnel AS
 SELECT
@@ -114,7 +117,31 @@ SELECT
   SUM(CASE WHEN sftp_delivery_status = 'deferred'  THEN 1 ELSE 0 END) AS n_deferred,
   SUM(CASE WHEN needs_review THEN 1 ELSE 0 END)                       AS n_needs_review,
   SUM(CASE WHEN needs_review AND sftp_delivery_status IS NULL
-           THEN 1 ELSE 0 END)                                         AS n_review_blocked
+           THEN 1 ELSE 0 END)                                         AS n_review_blocked,
+  -- ── Live Flow manual lane (twin of sql/views.sql) ────────────────────────
+  -- The first two are BATCH TOTALS, not queues: they count on file_size_mb and
+  -- error_stage, which mark-manual never touches (it only changes status).
+  -- Counting them on status would drain them as files are taken in hand and
+  -- the diagram's oversized + failed = manual arithmetic would stop adding up.
+  -- retry_parse clears error_stage, so a recovered file drops out.
+  -- 100 = MAX_FILE_SIZE_MB in algorithm-prod/nb_parse_documents.py.
+  SUM(CASE WHEN file_size_mb >= 100 THEN 1 ELSE 0 END)                AS n_oversized,
+  SUM(CASE WHEN error_stage = 'parsing' THEN 1 ELSE 0 END)            AS n_failed_parse,
+  -- Union: everything that needs (or needed) human work. status='manual' is in
+  -- the OR because a file can be marked manual from the Errors tab for reasons
+  -- other than size or parse failure; without it, it would vanish from the load.
+  -- boundary_source='manual' is in the OR for the same reason it discriminates
+  -- for every delivery consumer: it is the ONLY trace that survives a hand
+  -- UPDATE of the status. On 20260801 the 94 hand-annotated files carry
+  -- status='done' (forced on 2026-08-03) and a NULL error_stage — without this
+  -- arm the biggest batch's manual workload would read as zero.
+  SUM(CASE WHEN file_size_mb >= 100 OR error_stage = 'parsing'
+                OR status = 'manual' OR boundary_source = 'manual'
+           THEN 1 ELSE 0 END)                                         AS n_manual_total,
+  -- Boundaries actually drawn by hand. Distinct from n_manual_deliverable,
+  -- which also requires status='manual' and feeds v_batch_status's CASE: that
+  -- one stays put, or the 'delivered' threshold moves.
+  SUM(CASE WHEN boundary_source = 'manual' THEN 1 ELSE 0 END)         AS n_manual_noted
 FROM laplace.v_file_status
 GROUP BY day_id;
 

@@ -15,6 +15,52 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
   (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+// ── Timestamps ──────────────────────────────────────────────────────────────
+// Everything is STORED in UTC (the warehouse session is Etc/UTC and Lakebase
+// keeps UTC too) but arrives in two shapes: "2026-08-04T08:54:01.971Z" from
+// StatementExecution, and a naive "2026-08-04 08:54:01" from psycopg — see
+// stringify() in core/pg.py. A string without an offset is UTC by
+// construction, so pin the Z explicitly: new Date("2026-08-04 08:54:01")
+// parses as LOCAL time, which would shift the clock by the current Rome offset
+// and look plausible enough that nobody would notice.
+// sv-SE formats as "YYYY-MM-DD HH:MM:SS", keeping the layout the UI already
+// had; only the zone changes. Intl handles the CET/CEST switch by itself.
+const TZ = "Europe/Rome";
+const _TS_FMT = new Intl.DateTimeFormat("sv-SE", {
+  timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+});
+function fmtTs(v) {
+  const s = String(v ?? "").trim();
+  if (!s) return "";
+  const iso = s.replace(" ", "T");
+  const d = new Date(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : iso + "Z");
+  return isNaN(d.getTime()) ? s.slice(0, 19) : _TS_FMT.format(d);
+}
+
+// ── Errors tab badge ────────────────────────────────────────────────────────
+// Blinks while the selected batch has files that still need a human. Those
+// files also BLOCK delivery (run-deliver 409s), so the signal has to be
+// visible from every tab, not only from Errors — otherwise the operator finds
+// out only when the SFTP button refuses.
+// Fed from whatever data the app already has (batches list, funnel, errors
+// list); no extra polling — /api/days is the N+1 endpoint we must not hammer.
+function setErrorBadge(n) {
+  const el = $("tab-errors-badge");
+  if (!el) return;
+  const count = Number(n) || 0;
+  el.textContent = count > 99 ? "99+" : String(count);
+  el.classList.toggle("hidden", count === 0);
+  const btn = el.closest(".tab");
+  if (btn) {
+    btn.classList.toggle("has-errors", count > 0);
+    btn.title = count
+      ? `${count} file da sistemare a mano — la consegna SFTP è bloccata finché `
+        + `non li annoti nel tab Manual`
+      : "";
+  }
+}
+
 // ── API ─────────────────────────────────────────────────────────────────────
 const jget = (url) => fetch(url).then((r) => r.json());
 const jpost = (url, body) =>
@@ -117,6 +163,8 @@ async function loadDays(pickFirst = false) {
     setDay(keep ? prev : days[0].day_id);
     sel.value = state.dayId;
   }
+  const cur = days.find((d) => d.day_id === state.dayId);
+  if (cur) setErrorBadge((cur.counts || {}).n_delivery_blocked);
   renderBatches(days);
   return days;
 }
@@ -416,6 +464,8 @@ async function loadFlow() {
     manual: n(f.n_manual_total ?? 0),
   };
 
+  setErrorBadge(f.n_delivery_blocked);
+
   const running = (res.active_runs || []).length > 0;
   $("flow-runstate").textContent = running
     ? `⏳ job running: ${res.active_runs.map((r) => `${r.job} (${r.state})`).join(", ")}`
@@ -477,7 +527,7 @@ async function loadFlow() {
   const feed = $("flow-events");
   feed.innerHTML = (res.events || []).map((e) => `
     <div class="event-row ${e.event_type === "error" ? "err" : ""}">
-      <span class="ts">${esc((e.event_ts || "").slice(0, 19))}</span>
+      <span class="ts">${esc(fmtTs(e.event_ts))}</span>
       <span>${esc(e.stage)}</span>
       <span class="etype">${esc(e.event_type)}</span>
       <span class="fname">${esc(e.filename || e.detail || e.error_message || "")}</span>
@@ -529,6 +579,10 @@ async function loadErrors() {
   const res = await jget(`/api/errors?${dayQ()}`);
   if (res.error) return toast(`Errors: ${res.error}`, true);
   const rows = res.stuck || [];
+  // The badge counts only what BLOCKS delivery, which is a subset of the rows
+  // shown here (an sftp 'deferred' is stuck but must not block the retry).
+  setErrorBadge(rows.filter((r) =>
+    ["error", "skipped", "manual"].includes(r.status) && r.boundary_source !== "manual").length);
   if (!rows.length) {
     $("errors-body").innerHTML = "<div class='loading'>✓ Nothing stuck. All documented errors resolved.</div>";
     return;
@@ -640,7 +694,7 @@ async function loadSftp() {
           <td>${esc(r.n_pending)}</td>
           <td>${r.n_failed > 0 ? `<b style="color:var(--critical)">⚠ ${esc(r.n_failed)}</b>` : "0"}</td>
           <td>${r.n_deferred > 0 ? `<b style="color:var(--serious)">◔ ${esc(r.n_deferred)}</b>` : "0"}</td>
-          <td class="mono">${esc((r.last_delivered_at || "").slice(0, 19))}</td>
+          <td class="mono">${esc(fmtTs(r.last_delivered_at))}</td>
         </tr>`).join("")}
       </tbody></table></div>` : "<div class='loading'>No delivery activity yet.</div>";
 
@@ -737,7 +791,7 @@ async function showFile(dayId, filename) {
     <h4>Event timeline</h4>
     <div class="event-feed">${(res.events || []).map((e) => `
       <div class="event-row ${e.event_type === "error" ? "err" : ""}">
-        <span class="ts">${esc((e.event_ts || "").slice(0, 19))}</span>
+        <span class="ts">${esc(fmtTs(e.event_ts))}</span>
         <span>${esc(e.stage)}</span>
         <span class="etype">${esc(e.event_type)}</span>
         <span class="fname">${esc(e.detail || e.error_message || (e.old_status ? `${e.old_status} → ${e.new_status}` : ""))}</span>

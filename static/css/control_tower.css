@@ -86,6 +86,26 @@ body {
 }
 .tab:hover { background: var(--grid); }
 .tab.active { background: var(--accent); color: #fff; }
+
+/* Errors tab badge — blinks while files still need a human. Delivery is
+   blocked until they are split by hand, so this must be noticeable from any
+   tab. Count + label, never colour alone (same rule as the status badges). */
+.tab-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; margin-left: 6px; padding: 0 5px;
+  border-radius: 9px; font-size: 11px; font-weight: 700; line-height: 1;
+  background: var(--critical); color: #fff;
+  animation: badge-blink 1.6s ease-in-out infinite;
+}
+.tab.has-errors { color: var(--critical); font-weight: 600; }
+.tab.has-errors.active { color: #fff; }
+@keyframes badge-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tab-badge { animation: none; }
+}
 .topbar-right { display: flex; align-items: center; gap: 10px; }
 #day-select {
   padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px;

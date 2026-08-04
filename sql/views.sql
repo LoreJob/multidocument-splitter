@@ -108,7 +108,16 @@ SELECT
   -- Confini davvero disegnati a mano. Distinto da n_manual_deliverable, che
   -- richiede ANCHE status='manual' ed entra nel CASE di v_batch_status: quello
   -- non si tocca, o si sposta la soglia di 'delivered'.
-  SUM(CASE WHEN boundary_source = 'manual' THEN 1 ELSE 0 END)       AS n_manual_noted
+  SUM(CASE WHEN boundary_source = 'manual' THEN 1 ELSE 0 END)       AS n_manual_noted,
+  -- File che BLOCCANO la consegna: hanno bisogno di un umano e non hanno
+  -- ancora i confini disegnati a mano. Marcare manual non basta a sbloccare —
+  -- serve l'annotazione vera (decisione utente 2026-08-04).
+  -- NB: si basa sullo status, non su sftp_delivery_status, apposta. Una
+  -- consegna 'failed'/'deferred' NON deve bloccare, o il ritentativo che la
+  -- risolve resterebbe fuori per sempre.
+  SUM(CASE WHEN status IN ('error', 'skipped', 'manual')
+                AND (boundary_source IS NULL OR boundary_source <> 'manual')
+           THEN 1 ELSE 0 END)                                       AS n_delivery_blocked
 FROM v_file_status
 GROUP BY day_id;
 
@@ -195,6 +204,11 @@ SELECT *,
     WHEN sftp_delivery_status = 'pending'
          AND completed_at < current_timestamp() - INTERVAL 24 HOURS
       THEN 'awaiting sftp > 24h'
+    -- Marcato manual ma senza confini disegnati: blocca la consegna del batch
+    -- (v_funnel.n_delivery_blocked) e senza questo ramo bloccherebbe restando
+    -- invisibile — 'manual' non compare in nessun altro arm.
+    WHEN status = 'manual' AND (boundary_source IS NULL OR boundary_source <> 'manual')
+      THEN 'marcato manual, in attesa di annotazione — blocca la consegna'
     WHEN needs_review AND sftp_delivery_status IS NULL
       THEN CONCAT('needs review (', COALESCE(boundary_source, '?'), ') — delivery blocked')
     WHEN status = 'pending' AND created_at < current_timestamp() - INTERVAL 2 HOURS
@@ -204,6 +218,7 @@ FROM v_file_status
 WHERE
      status = 'error'
   OR status = 'skipped'
+  OR (status = 'manual' AND (boundary_source IS NULL OR boundary_source <> 'manual'))
   OR sftp_delivery_status IN ('failed', 'deferred')
   OR (status = 'parsing' AND started_at < current_timestamp() - INTERVAL 2 HOURS)
   OR (status = 'parsed' AND completed_at < current_timestamp() - INTERVAL 12 HOURS)

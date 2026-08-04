@@ -27,6 +27,13 @@ def _gate(n_sampled, n_annotated, complete):
             "missing": [], "complete": complete, "metrics": None}
 
 
+def _no_blockers(monkeypatch):
+    """run-deliver also refuses while files still need hand splitting. These
+    tests are about the ANNOTATION gate, so stub that second guard open —
+    otherwise they hit the warehouse. See test_delivery_blockers.py."""
+    monkeypatch.setattr(routes.queries, "delivery_blockers", lambda day, **k: [])
+
+
 def test_gate_opened_but_sample_vanished_is_409(monkeypatch):
     monkeypatch.setattr(routes.gate, "gate_state", lambda d: _gate(0, 0, False))
     monkeypatch.setattr(routes.queries, "batch_status",
@@ -41,6 +48,7 @@ def test_gate_opened_but_sample_vanished_is_409(monkeypatch):
 
 
 def test_never_sampled_batch_still_delivers(monkeypatch):
+    _no_blockers(monkeypatch)
     monkeypatch.setattr(routes.gate, "gate_state", lambda d: _gate(0, 0, False))
     monkeypatch.setattr(routes.queries, "batch_status",
                         lambda d=None: [{"day_id": d, "gate_opened": None}])
@@ -59,6 +67,7 @@ def test_incomplete_gate_still_409(monkeypatch):
 
 
 def test_complete_gate_delivers(monkeypatch):
+    _no_blockers(monkeypatch)
     monkeypatch.setattr(routes.gate, "gate_state", lambda d: _gate(6, 6, True))
     monkeypatch.setattr(routes.jobs, "run_deliver",
                         lambda d, r: {"run_id": 9, "job": "deliver"})

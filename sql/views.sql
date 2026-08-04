@@ -148,6 +148,13 @@ SELECT *,
   CASE
     WHEN status = 'error'
       THEN CONCAT('error at ', COALESCE(error_stage, '?'), ': ', COALESCE(error_message, ''))
+    -- Oversized: il parser LLM non li tocca (>100MB) e il PDF sta in
+    -- oversized/{day}/. Vanno annotati a mano dal tab Manual come i parse
+    -- failure: senza questo ramo non comparivano da nessuna parte e restavano
+    -- 'skipped' per sempre, invisibili.
+    WHEN status = 'skipped'
+      THEN CONCAT('oversized (', COALESCE(CAST(ROUND(file_size_mb, 0) AS STRING), '?'),
+                  ' MB) — annotare a mano dal tab Manual')
     WHEN sftp_delivery_status = 'failed'
       THEN CONCAT('sftp failed: ', COALESCE(sftp_delivery_error, ''))
     WHEN sftp_delivery_status = 'deferred'
@@ -171,6 +178,7 @@ SELECT *,
 FROM v_file_status
 WHERE
      status = 'error'
+  OR status = 'skipped'
   OR sftp_delivery_status IN ('failed', 'deferred')
   OR (status = 'parsing' AND started_at < current_timestamp() - INTERVAL 2 HOURS)
   OR (status = 'parsed' AND completed_at < current_timestamp() - INTERVAL 12 HOURS)

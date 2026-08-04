@@ -63,6 +63,16 @@ class VolumeClient:
         return sorted(dirs, reverse=True)  # newest batch first
 
     # ── read ───────────────────────────────────────────────────────────────
+    def exists(self, file_path: str) -> bool:
+        """Metadata-only probe (no download). Used to locate a PDF that may sit
+        in inbox/ or, when the parser skipped it for size, in oversized/ —
+        downloading a 460MB file just to find out is not an option."""
+        try:
+            self._w.files.get_metadata(file_path)
+            return True
+        except NotFound:
+            return False
+
     def download_bytes(self, file_path: str) -> bytes:
         resp = self._w.files.download(file_path)
         return resp.contents.read()

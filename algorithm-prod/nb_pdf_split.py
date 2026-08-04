@@ -50,10 +50,23 @@ DAY_ID = get_day_id()
 RUN_ID = get_run_id()
 PATHS = volume_paths(DAY_ID)
 
-INBOX_PATH   = PATHS["inbox"]
-ARCHIVE_PATH = PATHS["archive"]
-OUTPUT_PATH  = PATHS["output"]
-GT_PATH      = PATHS["ground_truth"]
+INBOX_PATH     = PATHS["inbox"]
+ARCHIVE_PATH   = PATHS["archive"]
+OUTPUT_PATH    = PATHS["output"]
+GT_PATH        = PATHS["ground_truth"]
+OVERSIZED_PATH = PATHS["oversized"]
+
+
+def source_pdf(filename: str) -> str:
+    """Where this PDF actually is: inbox/ normally, oversized/ for the >100MB
+    files nb_parse_documents set aside. Those are annotated by hand in the
+    Manual tab and must be splittable from where they were moved — PyMuPDF has
+    no size limit, only the LLM parser does."""
+    src = f"{INBOX_PATH}/{filename}.pdf"
+    if os.path.exists(src):
+        return src
+    alt = f"{OVERSIZED_PATH}/{filename}.pdf"
+    return alt if os.path.exists(alt) else src
 
 RUN_START = datetime.now()
 events = EventLogger(RUN_ID, DAY_ID, stage="pdf_split")
@@ -173,7 +186,7 @@ for row in split_tasks:
     predicted_starts = list(row["predicted_starts"])
     total_pages      = row["total_pages"]
 
-    src_path      = f"{INBOX_PATH}/{filename}.pdf"
+    src_path      = source_pdf(filename)      # inbox/ oppure oversized/
     output_folder = f"{OUTPUT_PATH}/{folder_id}"
     archive_dest  = f"{ARCHIVE_PATH}/{filename}.pdf"
 
@@ -184,6 +197,7 @@ for row in split_tasks:
             split_ok.append({
                 "filename": filename, "folder_id": folder_id,
                 "output_folder": output_folder, "archive_dest": archive_dest,
+                "src_path": src_path,
                 "split_source": "already_archived", "n_docs": 0,
             })
             continue
@@ -228,6 +242,7 @@ for row in split_tasks:
         split_ok.append({
             "filename": filename, "folder_id": folder_id,
             "output_folder": output_folder, "archive_dest": archive_dest,
+            "src_path": src_path,
             "split_source": split_source, "n_docs": n_docs_file,
             "n_pages": total_pages,
         })
@@ -313,12 +328,15 @@ archive_errors = []
 
 os.makedirs(ARCHIVE_PATH, exist_ok=True)
 for r in split_ok:
-    src_path = f"{INBOX_PATH}/{r['filename']}.pdf"
+    # Stessa sorgente risolta in PASS A: un file oversized va archiviato da
+    # oversized/, non da inbox/ dove non è mai stato.
+    src_path = r.get("src_path") or source_pdf(r["filename"])
     try:
         if os.path.exists(src_path):
             shutil.move(src_path, r["archive_dest"])
         elif not os.path.exists(r["archive_dest"]):
-            raise FileNotFoundError(f"missing from both inbox and archive: {r['filename']}.pdf")
+            raise FileNotFoundError(
+                f"missing from inbox, oversized and archive: {r['filename']}.pdf")
         archived.append(r)
         events.log("archived", filename=r["filename"], folder_id=r["folder_id"],
                    detail=r["archive_dest"])

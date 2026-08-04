@@ -1,10 +1,15 @@
-"""Manual annotation: hand-boundaries for parse-FAILED files.
+"""Manual annotation: hand-boundaries for files the automatic path cannot do.
 
-A file that failed `ai_parse_document` never gets a `split_results` row, so it is
-never sampled, never shown in the normal annotate worklist, and never delivered.
-This module lets a human draw boundaries for such files (rendered from the raw PDF
-still in `inbox/`, since PyMuPDF renders fine even when the LLM parse failed) and
-makes them **deliverable** by writing:
+Two populations end up here, both marked `status='manual'` from the Errors tab:
+  * **parse failures** — `ai_parse_document` errored, so there is no
+    `split_results` row; the PDF is still in `inbox/{day}/`.
+  * **oversized files (>100MB)** — nb_parse_documents never even tried them
+    (`status='skipped'`) and moved the PDF to `oversized/{day}/`.
+
+Either way the file is never sampled, never shown in the normal annotate
+worklist, and never delivered. This module lets a human draw boundaries on the
+raw PDF — PyMuPDF renders both cases fine, the 100MB ceiling belongs to the LLM
+parser, not to the renderer — and makes them **deliverable** by writing:
 
   * a ground-truth JSON in ground_truth/{day}/  (GT overrides the model in
     nb_pdf_split, and un-blocks the needs_review gate), and
@@ -17,6 +22,8 @@ never scored, so metrics stay untouched. The file universe here is the
 volume listing.
 """
 from __future__ import annotations
+
+from databricks.sdk.errors import NotFound
 
 from ..core.config import config
 from ..core.db import get_reader, get_sql
@@ -58,18 +65,54 @@ def build_worklist(day_id: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Rendering — from inbox/ (the raw PDF), not validation/
+#  Rendering — from the raw PDF, wherever the pipeline left it
+#
+#  Two kinds of file reach this tab and they live in different volumes:
+#    * parse failures      → still in inbox/{day}/
+#    * oversized (>100MB)  → moved to oversized/{day}/ by nb_parse_documents
+#  PyMuPDF renders both happily; the 100MB ceiling only applies to the LLM
+#  parser, which this path never uses — the human draws the boundaries.
 # ─────────────────────────────────────────────────────────────────────────────
+_BASE_CACHE: dict[tuple[str, str], str] = {}
+
+
+def source_base(day_id: str, filename: str) -> str:
+    """Volume path holding this file's PDF: inbox/ normally, oversized/ for the
+    big ones. Cached per (day, filename) — a page-by-page probe would add two
+    metadata calls to every image request."""
+    key = (day_id, filename)
+    cached = _BASE_CACHE.get(key)
+    if cached:
+        return cached
+    vols = get_volumes()
+    inbox = config.inbox_path(day_id)
+    oversized = config.volume_path(config.OVERSIZED_VOLUME, day_id)
+    base = inbox if vols.exists(vols.pdf_path(inbox, filename)) else oversized
+    _BASE_CACHE[key] = base
+    return base
+
+
+def forget_source(day_id: str, filename: str) -> None:
+    """Drop a cached location — call when a read fails, so a file that moved
+    (archived after delivery) is resolved again instead of failing forever."""
+    _BASE_CACHE.pop((day_id, filename), None)
+
+
 def page_count(day_id: str, filename: str) -> int:
-    return annotation.page_count(day_id, filename, config.inbox_path(day_id))
+    try:
+        return annotation.page_count(day_id, filename, source_base(day_id, filename))
+    except NotFound:
+        forget_source(day_id, filename)
+        return annotation.page_count(day_id, filename, source_base(day_id, filename))
 
 
 def render_page_jpeg(day_id: str, filename: str, n: int) -> bytes:
-    return annotation.render_page_jpeg(day_id, filename, n, config.inbox_path(day_id))
+    return annotation.render_page_jpeg(day_id, filename, n,
+                                       source_base(day_id, filename))
 
 
 def prewarm(day_id: str, filename: str, total_pages: int) -> None:
-    annotation.prewarm(day_id, filename, total_pages, config.inbox_path(day_id))
+    annotation.prewarm(day_id, filename, total_pages, source_base(day_id, filename))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -17,7 +17,7 @@ from pathlib import Path
 import fitz  # PyMuPDF — server-side page rendering
 
 from ..core.config import config
-from ..core.db import get_sql
+from ..core.db import get_reader
 from ..core.volumes import get_volumes
 from .evaluation import evaluate, aggregate_stats_grouped
 
@@ -52,7 +52,7 @@ def build_worklist(day_id: str) -> dict:
 def get_model_prediction(filename: str, day_id: str | None = None) -> dict | None:
     """Latest split_results row for (day_id, filename). Same filename may exist
     in several day batches — day_id disambiguates; None falls back to latest."""
-    sql = get_sql()
+    sql = get_reader()
     day_filter = "AND day_id = :day" if day_id else ""
     params = [sql.str_param("fname", filename)]
     if day_id:
@@ -61,7 +61,7 @@ def get_model_prediction(filename: str, day_id: str | None = None) -> dict | Non
         f"""
         SELECT filename, folder_id, total_pages, predicted_starts,
                n_documents, model_used
-        FROM {config.fq(config.TABLE_SPLIT_RESULTS)}
+        FROM {config.rq(config.TABLE_SPLIT_RESULTS)}
         WHERE filename = :fname {day_filter}
         ORDER BY processing_timestamp DESC
         LIMIT 1
@@ -260,12 +260,12 @@ def prewarm(day_id: str, filename: str, total_pages: int, base_path: str | None 
 #  Dashboard stats (evaluation_results aggregate)
 # ─────────────────────────────────────────────────────────────────────────────
 def get_eval_stats() -> dict:
-    sql = get_sql()
+    sql = get_reader()
     rows = sql.execute(
         f"""
         SELECT model_starts, exact_match, multidoc_correct,
                precision, recall, f1, f1_tol, n_offby1, gt_is_multidoc
-        FROM {config.fq(config.TABLE_EVALUATION)}
+        FROM {config.rq(config.TABLE_EVALUATION)}
         """
     )
     norm = []
@@ -361,12 +361,18 @@ def _insert_evaluation_row(gt: dict, model: dict | None, ev) -> None:
 
     Every string goes in as a bound parameter. The numbers do NOT: named
     parameters have no ARRAY type in StatementExecution, so gt_starts /
-    model_starts must be `array(1, 5, 9)` literals — which is safe only because
+    model_starts must be array literals — which is safe only because
     _int_array_literal() int()-coerces each element. The scalar numbers are
     coerced here for the same reason, rather than trusting a distant caller.
+
+    Backend follows get_reader(): evaluation_results lives natively in
+    Lakebase when LAKEBASE_ENABLED (the notebooks never touch this table),
+    on the warehouse otherwise. Only two dialect differences exist here:
+    the array literal spelling and nothing else — `current_timestamp`
+    without parentheses is valid in both engines.
     """
-    sql = get_sql()
-    table = config.fq(config.TABLE_EVALUATION)
+    sql = get_reader()
+    table = config.rq(config.TABLE_EVALUATION)
     params = []
 
     def p(name: str, value) -> str:
@@ -385,11 +391,12 @@ def _insert_evaluation_row(gt: dict, model: dict | None, ev) -> None:
     annotator = p("annotator", gt["annotator"])
 
     # Numbers + arrays — literals, coerced at the point of use.
-    gt_starts = _int_array_literal(gt["predicted_starts"])
+    pg = config.LAKEBASE_ENABLED
+    gt_starts = _int_array_literal(gt["predicted_starts"], pg=pg)
     gt_n = int(gt["n_documents"])
     total_pages = int(gt["total_pages"])
     gt_multi = "TRUE" if gt["is_multidoc"] else "FALSE"
-    model_starts = _int_array_literal(model["predicted_starts"]) if model else "NULL"
+    model_starts = _int_array_literal(model["predicted_starts"], pg=pg) if model else "NULL"
     model_n = int(model["n_documents"]) if model else "NULL"
 
     if ev:
@@ -421,7 +428,7 @@ def _insert_evaluation_row(gt: dict, model: dict | None, ev) -> None:
             {model_starts}, {model_n}, {model_used},
             {exact_match},
             {metrics},
-            {annotator}, current_timestamp()
+            {annotator}, current_timestamp
         )
     """
     sql.execute(stmt, parameters=params)
@@ -485,7 +492,12 @@ def _parse_int_array(v) -> list[int]:
     return [int(x.strip().strip('"').strip("'")) for x in s.split(",") if x.strip()]
 
 
-def _int_array_literal(arr: list[int]) -> str:
-    """`array(1, 5, 9)`. A literal because StatementExecution has no ARRAY
-    parameter type; safe because every element is int()-coerced here."""
-    return "array(" + ", ".join(str(int(x)) for x in arr) + ")"
+def _int_array_literal(arr: list[int], pg: bool = False) -> str:
+    """`array(1, 5, 9)` (Databricks) or `ARRAY[1, 5, 9]` (Postgres). A literal
+    because StatementExecution has no ARRAY parameter type; safe because every
+    element is int()-coerced here. manual.py keeps the Databricks default —
+    its split_results row must land in UC where nb_pdf_split reads it."""
+    inner = ", ".join(str(int(x)) for x in arr)
+    if pg:
+        return f"ARRAY[{inner}]" if inner else "ARRAY[]::integer[]"
+    return f"array({inner})"

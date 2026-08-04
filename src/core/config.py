@@ -60,11 +60,38 @@ class Config:
     TABLE_EVALUATION = "evaluation_results"
     TABLE_PROCESSING_LOG = "processing_log"
 
+    # ── Lakebase serving layer (reads + evaluation_results) ────────────────
+    # UC stays the source of truth; the app READS from Postgres synced tables
+    # when enabled. Flip LAKEBASE_ENABLED=0 to fall back to the warehouse —
+    # nothing else changes (see core/db.get_reader()).
+    LAKEBASE_ENABLED = os.environ.get("LAKEBASE_ENABLED", "") == "1"
+    LAKEBASE_ENDPOINT = os.environ.get(
+        "LAKEBASE_ENDPOINT",
+        "projects/laplace-multidocument-cockpit/branches/production/endpoints/primary",
+    )
+    LAKEBASE_HOST = os.environ.get(
+        "LAKEBASE_HOST",
+        "ep-broad-flower-e29e9vb7.database.westeurope.azuredatabricks.net",
+    )
+    LAKEBASE_DB = os.environ.get("LAKEBASE_DB", "databricks_postgres")
+    # Schema holding the app's views + evaluation_results; synced tables keep
+    # their own schema and the views reference them explicitly.
+    LAKEBASE_SCHEMA = os.environ.get("LAKEBASE_SCHEMA", "laplace")
+
     # ── Derived helpers ────────────────────────────────────────────────────
     @classmethod
     def fq(cls, name: str) -> str:
         """Backtick-quoted fully qualified table/view name (the schema has a hyphen)."""
         return f"`{cls.CATALOG}`.`{cls.SCHEMA}`.`{name}`"
+
+    @classmethod
+    def rq(cls, name: str) -> str:
+        """READ-qualified name, paired with core.db.get_reader().
+
+        Lakebase on → bare name (search_path resolves it in Postgres);
+        off → the usual backticked UC name. Never use for writes to UC-owned
+        tables — those stay on fq() + get_sql()."""
+        return name if cls.LAKEBASE_ENABLED else cls.fq(name)
 
     @classmethod
     def volume_path(cls, volume: str, day_id: str | None = None) -> str:

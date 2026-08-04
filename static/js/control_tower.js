@@ -608,6 +608,13 @@ async function loadErrors() {
               ? actBtn("retry-parse", r, "↻ parse") : ""}
             ${r.status === "error" && r.error_stage === "pdf_split"
               ? actBtn("retry-split", r, "↻ split") : ""}
+            ${/* A file whose PHYSICAL split failed has no output PDFs, so
+                  retry-sftp would upload nothing and fail again. It needs
+                  sftp_delivery_status back to NULL to re-enter nb_pdf_split's
+                  candidate set — and its boundaries must survive. */""}
+            ${r.sftp_delivery_status === "failed"
+              && /pdf_split failed|no such file/i.test(r.sftp_delivery_error || r.stuck_reason || "")
+              ? actBtn("retry-pdf-split", r, "↻ split PDF") : ""}
             ${["failed", "deferred"].includes(r.sftp_delivery_status)
               ? actBtn("retry-sftp", r, "↻ sftp") : ""}
             ${r.needs_review === "true" || r.needs_review === true

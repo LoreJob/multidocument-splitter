@@ -139,6 +139,14 @@ body {
 .btn.tiny { padding: 3px 8px; font-size: 12px; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
+/* Errors tab: rows whose only fix is re-running a job. Deliberately not a
+   button — every retry action filters on 'failed'/'deferred' and would no-op
+   here, and a button that does nothing is worse than a sentence. */
+.no-action {
+  display: inline-block; padding: 3px 0; font-size: 12px;
+  color: var(--muted); font-style: italic;
+}
+
 /* ── Status badges (icon + label — color never alone) ────────────────── */
 .badge {
   display: inline-flex; align-items: center; gap: 5px;

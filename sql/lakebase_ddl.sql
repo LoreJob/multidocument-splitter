@@ -243,7 +243,43 @@ SELECT *,
       THEN CONCAT('needs review (', COALESCE(boundary_source, '?'), ') — delivery blocked')
     WHEN status = 'pending' AND created_at < now() - interval '2 hours'
       THEN 'stuck in pending > 2h (never picked up by parse)'
-  END AS stuck_reason
+  END AS stuck_reason,
+  -- stuck_kind — la stessa scala di stuck_reason, arm per arm, nello stesso
+  -- ordine, ma etichettata invece che raccontata. Il tab Errori ci mappa sopra
+  -- l'azione da offrire: prima erano condizioni indipendenti nel JS, quindi su
+  -- una riga comparivano insieme tutti i bottoni che matchavano — compreso
+  -- quello che fa danno (retry_sftp su uno split fallito porta
+  -- sftp_delivery_status a 'pending', non-NULL, e nb_pdf_split esclude per
+  -- sempre tutto ciò che non è NULL).
+  -- Tenere l'ordine allineato a stuck_reason: è ciò che garantisce che etichetta
+  -- e frase non possano descrivere due cose diverse.
+  CASE
+    WHEN status = 'error' AND error_stage = 'parsing'   THEN 'parse_error'
+    WHEN status = 'error' AND error_stage = 'pdf_split' THEN 'split_error'
+    WHEN status = 'error'                               THEN 'error_other'
+    WHEN status = 'skipped'                             THEN 'oversized'
+    -- Il prefisso lo scrive nb_pdf_split quando il MERGE devia l'errore sul
+    -- canale sftp per non far perdere lo status 'manual' al file annotato a
+    -- mano. È l'unica cosa che distingue uno split fisico fallito da un upload
+    -- fallito: entrambi sono sftp_delivery_status='failed'.
+    WHEN sftp_delivery_status = 'failed'
+         AND sftp_delivery_error LIKE 'pdf_split failed:%' THEN 'pdf_split_failed'
+    WHEN sftp_delivery_status = 'failed'                THEN 'sftp_failed'
+    WHEN sftp_delivery_status = 'deferred'              THEN 'sftp_deferred'
+    WHEN status = 'parsing' AND started_at < now() - interval '2 hours'
+      THEN 'stuck_parsing'
+    WHEN status = 'parsed' AND completed_at < now() - interval '12 hours'
+      THEN 'stuck_parsed'
+    WHEN sftp_delivery_status = 'pending' AND archived_path IS NULL
+         AND completed_at < now() - interval '2 hours'  THEN 'not_archived'
+    WHEN sftp_delivery_status = 'pending'
+         AND completed_at < now() - interval '24 hours' THEN 'sftp_stale'
+    WHEN status = 'manual' AND (boundary_source IS NULL OR boundary_source <> 'manual')
+      THEN 'awaiting_manual'
+    WHEN needs_review AND sftp_delivery_status IS NULL  THEN 'needs_review'
+    WHEN status = 'pending' AND created_at < now() - interval '2 hours'
+      THEN 'stuck_pending'
+  END AS stuck_kind
 FROM laplace.v_file_status
 WHERE
      status = 'error'

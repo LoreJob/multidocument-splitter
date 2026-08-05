@@ -135,9 +135,12 @@ function setDay(id) {
 
 // Switch batch + tab together. Carrying the day_id is the whole point: the old
 // two-app link opened the annotator at its root and let it pick its own batch.
+// Returns false when the switch was refused (unsaved annotation), so a caller
+// that wants to do something ON the target tab knows it never got there.
 function goTab(tab, dayId) {
-  if (dayId && !setDay(dayId)) return;
+  if (dayId && !setDay(dayId)) return false;
   document.querySelector(`[data-tab="${tab}"]`).click();
+  return true;
 }
 window.goTab = goTab;
 
@@ -598,29 +601,14 @@ async function loadErrors() {
       </tr></thead>
       <tbody>${rows.map((r) => `
         <tr>
-          <td><input type="checkbox" class="err-check" data-day="${esc(r.day_id)}" data-fn="${esc(r.filename)}" onclick="updateErrBulk()"></td>
+          <td>${MARK_MANUAL_KINDS.has(errKind(r))
+            ? `<input type="checkbox" class="err-check" data-day="${esc(r.day_id)}" data-fn="${esc(r.filename)}" onclick="updateErrBulk()">`
+            : ""}</td>
           <td class="mono">${esc(r.day_id)}</td>
           <td class="fname">${esc(r.filename)}</td>
           <td>${esc(r.status)}${r.sftp_delivery_status ? " / " + esc(r.sftp_delivery_status) : ""}</td>
           <td class="reason">${esc(r.stuck_reason || r.error_message || "")}</td>
-          <td>
-            ${r.status === "error" && r.error_stage === "parsing"
-              ? actBtn("retry-parse", r, "↻ parse") : ""}
-            ${r.status === "error" && r.error_stage === "pdf_split"
-              ? actBtn("retry-split", r, "↻ split") : ""}
-            ${/* A file whose PHYSICAL split failed has no output PDFs, so
-                  retry-sftp would upload nothing and fail again. It needs
-                  sftp_delivery_status back to NULL to re-enter nb_pdf_split's
-                  candidate set — and its boundaries must survive. */""}
-            ${r.sftp_delivery_status === "failed"
-              && /pdf_split failed|no such file/i.test(r.sftp_delivery_error || r.stuck_reason || "")
-              ? actBtn("retry-pdf-split", r, "↻ split PDF") : ""}
-            ${["failed", "deferred"].includes(r.sftp_delivery_status)
-              ? actBtn("retry-sftp", r, "↻ sftp") : ""}
-            ${r.needs_review === "true" || r.needs_review === true
-              ? actBtn("approve-review", r, "✓ approve") : ""}
-            ${actBtn("mark-manual", r, "✋ manual")}
-          </td>
+          <td>${errActions(r)}</td>
         </tr>`).join("")}
       </tbody></table></div>`;
 }
@@ -666,6 +654,90 @@ async function markSelectedManual() {
 window.toggleAllErrors = toggleAllErrors;
 window.updateErrBulk = updateErrBulk;
 window.markSelectedManual = markSelectedManual;
+
+// ── Errors: which action does THIS kind of stuck deserve? ───────────────────
+// The buttons used to be independent conditions rendered side by side, so a row
+// showed every one that happened to match. On a failed physical split that put
+// `↻ split PDF` next to `↻ sftp`, and the second one is a trap: retry_sftp sets
+// sftp_delivery_status='pending', which is non-NULL, and nb_pdf_split's
+// candidate query excludes everything non-NULL — the file never gets split
+// again and the upload keeps looking for output PDFs that were never produced.
+// The classification now comes from v_stuck_files.stuck_kind, computed by the
+// same CASE ladder that writes stuck_reason, so label and action cannot drift.
+
+// Fallback for when stuck_kind is absent: the app deployed ahead of the views,
+// or run_local. Mirrors the SQL ladder arm for arm. The time-based arms need
+// only the status here — v_stuck_files' WHERE already guarantees a row with
+// status='parsing' is there *because* it has been parsing > 2h.
+function errKind(r) {
+  if (r.stuck_kind) return r.stuck_kind;
+  const err = `${r.sftp_delivery_error || ""} ${r.stuck_reason || ""}`;
+  if (r.status === "error" && r.error_stage === "parsing") return "parse_error";
+  if (r.status === "error" && r.error_stage === "pdf_split") return "split_error";
+  if (r.status === "error") return "error_other";
+  if (r.status === "skipped") return "oversized";
+  if (r.sftp_delivery_status === "failed" && /pdf_split failed:/.test(err)) return "pdf_split_failed";
+  if (r.sftp_delivery_status === "failed") return "sftp_failed";
+  if (r.sftp_delivery_status === "deferred") return "sftp_deferred";
+  if (r.status === "parsing") return "stuck_parsing";
+  if (r.status === "parsed") return "stuck_parsed";
+  // not_archived and sftp_stale differ only in wording; same (absent) action.
+  if (r.sftp_delivery_status === "pending") return "sftp_stale";
+  if (r.status === "manual" && r.boundary_source !== "manual") return "awaiting_manual";
+  if (r.needs_review === true || r.needs_review === "true") return "needs_review";
+  if (r.status === "pending") return "stuck_pending";
+  return "error_other";
+}
+
+// kind → what an operator can actually do about it. `✋ manual` appears only
+// where mark_manual changes something: never on an sftp failure (the file is
+// already split — flipping a 'done' file to manual puts it in the manual
+// worklist, where a save DELETEs its real split_results row), and never on a
+// file that is already status='manual'.
+const ERR_ACTIONS = {
+  parse_error:      (r) => actBtn("retry-parse", r, "↻ parse") + actBtn("mark-manual", r, "✋ manual"),
+  split_error:      (r) => actBtn("retry-split", r, "↻ split") + actBtn("mark-manual", r, "✋ manual"),
+  error_other:      (r) => actBtn("mark-manual", r, "✋ manual"),
+  oversized:        (r) => actBtn("mark-manual", r, "✋ manual"),
+  pdf_split_failed: (r) => actBtn("retry-pdf-split", r, "↻ split PDF"),
+  sftp_failed:      (r) => actBtn("retry-sftp", r, "↻ sftp"),
+  sftp_deferred:    (r) => actBtn("retry-sftp", r, "↻ sftp"),
+  stuck_parsing:    (r) => actBtn("mark-manual", r, "✋ manual"),
+  stuck_parsed:     (r) => actBtn("retry-split", r, "↻ split") + actBtn("mark-manual", r, "✋ manual"),
+  // Nothing to click: every retry action filters on 'failed'/'deferred', so on a
+  // 'pending' row they are no-ops. Saying so beats offering a button that lies.
+  not_archived:     () => `<span class="no-action">— rilanciare job_deliver</span>`,
+  sftp_stale:       () => `<span class="no-action">— rilanciare job_deliver</span>`,
+  awaiting_manual:  (r) => annotateBtn(r),
+  needs_review:     (r) => actBtn("approve-review", r, "✓ approve") + actBtn("mark-manual", r, "✋ manual"),
+  stuck_pending:    (r) => actBtn("mark-manual", r, "✋ manual"),
+};
+
+function errActions(r) {
+  const fn = ERR_ACTIONS[errKind(r)] || ERR_ACTIONS.error_other;
+  return fn(r);
+}
+
+// The bulk bar is the second door to mark-manual and must agree with the first:
+// a row that gets no `✋ manual` button gets no checkbox either. Otherwise the
+// per-row rule is one click away from being bypassed on 200 files at once.
+// Keep in sync with ERR_ACTIONS above.
+const MARK_MANUAL_KINDS = new Set([
+  "parse_error", "split_error", "error_other", "oversized",
+  "stuck_parsing", "stuck_parsed", "needs_review", "stuck_pending",
+]);
+
+// Already marked manual, boundaries still missing: the fix is to draw them, not
+// to mark it manual again. Navigation, not a server action.
+function annotateBtn(row) {
+  return `<button class="btn tiny" onclick="goAnnotateManual('${esc(row.day_id)}')">✏️ annota</button> `;
+}
+
+function goAnnotateManual(dayId) {
+  if (!goTab("annotate", dayId)) return;
+  if (window.Annotate && window.Annotate.openManual) window.Annotate.openManual();
+}
+window.goAnnotateManual = goAnnotateManual;
 
 function actBtn(type, row, label) {
   return `<button class="btn tiny" onclick="doAction('${type}','${esc(row.day_id)}','${esc(row.filename)}')">${label}</button> `;

@@ -366,6 +366,13 @@ const Annotate = (() => {
     }
   });
 
-  return { enter, leave, onDayChange, isDirty: () => ann.dirty };
+  // openManual — the Errors tab sends here the files marked manual that still
+  // have no boundaries. setMode() is a no-op when already in manual mode, so
+  // arriving twice is harmless.
+  return {
+    enter, leave, onDayChange,
+    isDirty: () => ann.dirty,
+    openManual: () => setMode("manual"),
+  };
 })();
 window.Annotate = Annotate;

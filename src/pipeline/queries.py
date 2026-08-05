@@ -60,7 +60,8 @@ def stuck_files(day_id: str | None = None) -> list[dict]:
     where, params = _day_params(sql, day_id)
     return sql.execute(
         f"""SELECT day_id, filename, folder_id, status, sftp_delivery_status,
-                   sftp_delivery_error, stuck_reason, error_stage, error_message,
+                   sftp_delivery_error, stuck_reason, stuck_kind, error_stage,
+                   error_message,
                    retry_count, needs_review, boundary_source, completed_at
             FROM {config.rq('v_stuck_files')} {where}
             ORDER BY day_id DESC, stuck_reason, filename""",

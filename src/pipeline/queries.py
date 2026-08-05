@@ -34,6 +34,27 @@ def funnel(day_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
+def delivery_blockers(day_id: str, limit: int = 20) -> list[dict]:
+    """Files that must be hand-annotated before the batch can be delivered.
+
+    Same predicate as v_funnel.n_delivery_blocked — kept here as a name list
+    so the 409 can say WHICH files, not just how many. Delivery status is
+    deliberately not part of it: a failed or deferred upload must never block
+    the retry that repairs it.
+    """
+    sql = get_reader()
+    return sql.execute(
+        f"""SELECT filename, status, file_size_mb, error_stage
+            FROM {config.rq('v_file_status')}
+            WHERE day_id = :day
+              AND status IN ('error', 'skipped', 'manual')
+              AND (boundary_source IS NULL OR boundary_source <> 'manual')
+            ORDER BY filename
+            LIMIT {int(limit)}""",
+        parameters=[sql.str_param("day", day_id)],
+    )
+
+
 def stuck_files(day_id: str | None = None) -> list[dict]:
     sql = get_reader()
     where, params = _day_params(sql, day_id)

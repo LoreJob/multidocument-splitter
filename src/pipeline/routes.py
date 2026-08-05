@@ -240,6 +240,21 @@ def run_deliver():
                              f"deliver an unannotated batch",
                     "gate": g,
                 }), 409
+        # Errors gate: nothing ships while files still need a human. Marking a
+        # file manual is NOT enough — it must actually be split by hand
+        # (boundary_source='manual'). See v_funnel.n_delivery_blocked.
+        # Deliberately not applied to /redeliver: that repairs an already-split
+        # batch, and blocking it would strand output over an unrelated file.
+        blockers = queries.delivery_blockers(day)
+        if blockers:
+            names = [b["filename"] for b in blockers]
+            return jsonify({
+                "error": f"{len(names)} file da sistemare a mano prima della consegna — "
+                         f"annotali nel tab Manual (split manuale). "
+                         f"Vedi il tab Errors.",
+                "blockers": blockers,
+                "blocked_files": names,
+            }), 409
         res = jobs.run_deliver(day, remote)
         return jsonify({"launched": True, **res})
     except Exception:  # noqa: BLE001

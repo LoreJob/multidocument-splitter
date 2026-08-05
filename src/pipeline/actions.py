@@ -206,6 +206,33 @@ def _log_events_bulk(sql, day_id: str, event_type: str, filenames: list[str],
     )
 
 
+def retry_pdf_split(day_id: str, filename: str) -> str:
+    """Re-queue a file for the PHYSICAL split, keeping its boundaries.
+
+    nb_pdf_split treats `sftp_delivery_status IS NOT NULL` as "already split",
+    so a file whose split failed sits at 'failed' and is skipped forever. Only
+    NULL brings it back into the candidate set — 'pending' does not, and
+    retry_sftp (which sets 'pending') makes it worse: the upload then looks for
+    output PDFs that were never produced and fails again.
+
+    Deliberately does NOT delete split_results, unlike retry_split: on a
+    hand-annotated file that row IS the human's work (boundary_source='manual')
+    and deleting it would throw the annotation away.
+    """
+    sql = get_sql()
+    sql.execute(
+        f"""UPDATE {_LOG}
+            SET sftp_delivery_status = NULL, sftp_delivery_error = NULL,
+                error_message = NULL, error_stage = NULL
+            WHERE day_id = :day AND filename = :f
+              AND sftp_delivery_status = 'failed'""",
+        parameters=[sql.str_param("day", day_id), sql.str_param("f", filename)],
+    )
+    _log_event(sql, day_id, "requeued", filename,
+               "retry pdf split: sftp_delivery_status → NULL, boundaries kept")
+    return "requeued for pdf split (boundaries kept)"
+
+
 def approve_review(day_id: str, filename: str) -> str:
     """Approve an unsplit [1]-fallback for delivery as-is."""
     sql = get_sql()
@@ -250,6 +277,7 @@ ACTIONS = {
     "retry-parse": retry_parse,
     "retry-split": retry_split,
     "retry-sftp": retry_sftp,
+    "retry-pdf-split": retry_pdf_split,
     "mark-manual": mark_manual,
     "approve-review": approve_review,
 }

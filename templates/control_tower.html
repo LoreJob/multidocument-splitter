@@ -19,7 +19,10 @@
         <button class="tab" data-tab="flow">Live Flow</button>
         <button class="tab" data-tab="gate">Annotation Gate</button>
         <button class="tab" data-tab="annotate">Annotate</button>
-        <button class="tab" data-tab="errors">Errors</button>
+        <!-- The badge blinks while files still need a human: delivery is
+             blocked until they are split by hand. Filled by setErrorBadge(). -->
+        <button class="tab" data-tab="errors">Errors<span id="tab-errors-badge"
+          class="tab-badge hidden"></span></button>
         <button class="tab" data-tab="sftp">SFTP</button>
         <button class="tab" data-tab="review">Review</button>
         <button class="tab" data-tab="files">Files</button>

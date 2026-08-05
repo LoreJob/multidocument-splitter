@@ -9,6 +9,13 @@ const esc = (s) =>
 const pct = (x) => `${Math.round((x || 0) * 100)}%`;
 const num = (x) => (x == null ? "—" : x);
 
+// Rome, like the control tower (see fmtTs there). sv-SE keeps the
+// "YYYY-MM-DD HH:MM:SS" layout so exports sort chronologically by name.
+const ROME_FMT = new Intl.DateTimeFormat("sv-SE", {
+  timeZone: "Europe/Rome", year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+});
+
 function statCard(val, label, sub, wide = false) {
   return `<div class="stat${wide ? " wide" : ""}">
     <span class="s-val">${esc(num(val))}</span>
@@ -69,7 +76,9 @@ async function load() {
     return;
   }
   const all = data.all;
-  const now = new Date().toLocaleString();
+  // Pinned to Rome, not the viewer's locale: an exported dashboard gets read
+  // by someone else, and "Generated 3:41 PM" means nothing without a zone.
+  const now = ROME_FMT.format(new Date());
   document.getElementById("dash-generated").textContent = `Generated ${now}`;
   document.getElementById("dash-foot").textContent =
     `${all.n_annotated} PDFs · ${all.n_with_model} compared vs model`;
@@ -111,7 +120,9 @@ async function downloadHTML() {
 }
 
 function stamp() {
-  return new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  // Rome, like everything else the user sees: an export named with a UTC
+  // stamp sorts fine but disagrees with the "Generated ..." line inside it.
+  return ROME_FMT.format(new Date()).replace(/[:\s]/g, "-");
 }
 
 document.getElementById("btn-png").onclick = downloadPNG;

@@ -15,6 +15,52 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
   (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
+// ── Timestamps ──────────────────────────────────────────────────────────────
+// Everything is STORED in UTC (the warehouse session is Etc/UTC and Lakebase
+// keeps UTC too) but arrives in two shapes: "2026-08-04T08:54:01.971Z" from
+// StatementExecution, and a naive "2026-08-04 08:54:01" from psycopg — see
+// stringify() in core/pg.py. A string without an offset is UTC by
+// construction, so pin the Z explicitly: new Date("2026-08-04 08:54:01")
+// parses as LOCAL time, which would shift the clock by the current Rome offset
+// and look plausible enough that nobody would notice.
+// sv-SE formats as "YYYY-MM-DD HH:MM:SS", keeping the layout the UI already
+// had; only the zone changes. Intl handles the CET/CEST switch by itself.
+const TZ = "Europe/Rome";
+const _TS_FMT = new Intl.DateTimeFormat("sv-SE", {
+  timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit",
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+});
+function fmtTs(v) {
+  const s = String(v ?? "").trim();
+  if (!s) return "";
+  const iso = s.replace(" ", "T");
+  const d = new Date(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : iso + "Z");
+  return isNaN(d.getTime()) ? s.slice(0, 19) : _TS_FMT.format(d);
+}
+
+// ── Errors tab badge ────────────────────────────────────────────────────────
+// Blinks while the selected batch has files that still need a human. Those
+// files also BLOCK delivery (run-deliver 409s), so the signal has to be
+// visible from every tab, not only from Errors — otherwise the operator finds
+// out only when the SFTP button refuses.
+// Fed from whatever data the app already has (batches list, funnel, errors
+// list); no extra polling — /api/days is the N+1 endpoint we must not hammer.
+function setErrorBadge(n) {
+  const el = $("tab-errors-badge");
+  if (!el) return;
+  const count = Number(n) || 0;
+  el.textContent = count > 99 ? "99+" : String(count);
+  el.classList.toggle("hidden", count === 0);
+  const btn = el.closest(".tab");
+  if (btn) {
+    btn.classList.toggle("has-errors", count > 0);
+    btn.title = count
+      ? `${count} file da sistemare a mano — la consegna SFTP è bloccata finché `
+        + `non li annoti nel tab Manual`
+      : "";
+  }
+}
+
 // ── API ─────────────────────────────────────────────────────────────────────
 const jget = (url) => fetch(url).then((r) => r.json());
 const jpost = (url, body) =>
@@ -82,6 +128,7 @@ function setDay(id) {
   state.dayId = id;
   $("day-select").value = id;
   state.lastFunnel = null;   // don't animate against another batch's numbers
+  resetFunnelTweens();       // nor tween from them: 1480 → 4 is not progress
   if (window.Annotate) window.Annotate.onDayChange();
   return true;
 }
@@ -116,6 +163,8 @@ async function loadDays(pickFirst = false) {
     setDay(keep ? prev : days[0].day_id);
     sel.value = state.dayId;
   }
+  const cur = days.find((d) => d.day_id === state.dayId);
+  if (cur) setErrorBadge((cur.counts || {}).n_delivery_blocked);
   renderBatches(days);
   return days;
 }
@@ -189,18 +238,203 @@ function renderBatches(days) {
 }
 
 // ── Live flow panel ─────────────────────────────────────────────────────────
-const STAGES = [
-  { key: "inbox",      lbl: "Inbox",      sub: "uploaded" },
-  { key: "parsed",     lbl: "Parsed",     sub: "ai_parse_document" },
-  { key: "predicted",  lbl: "Predicted",  sub: "LLM boundaries" },
-  { key: "gate",       lbl: "Ground truth", sub: "annotation gate" },
-  { key: "split",      lbl: "Split",      sub: "physical PDFs" },
-  { key: "delivered",  lbl: "Delivered",  sub: "SFTP" },
+// Two rows. The main track is the automated pipeline; the manual lane below it
+// carries the files a human has to handle — oversized (>100MB, never parsed)
+// and parse failures — and rejoins the track at Split, because a hand-annotated
+// file is split and delivered like any other.
+const MAIN_STAGES = [
+  { key: "inbox",     lbl: "Inbox" },
+  { key: "parsed",    lbl: "Parsed" },
+  { key: "predicted", lbl: "Predicted" },
+  { key: "gate",      lbl: "Ground truth" },
+  { key: "split",     lbl: "Split" },
+  { key: "delivered", lbl: "Delivered" },
 ];
+// col = which main-track column the lane node sits under.
+const LANE_STAGES = [
+  { key: "oversized", lbl: "Oversized",    col: 1 },
+  { key: "failed",    lbl: "Failed parse", col: 2 },
+  { key: "manual",    lbl: "Manual",       col: 4, soft: true },
+];
+
+// id, from, to, shape. "h" horizontal · "drop" down into the lane ·
+// "join" back up onto the main track.
+const WIRES = [
+  ["inbox>parsed",     "inbox",     "parsed",    "h"],
+  ["parsed>predicted", "parsed",    "predicted", "h"],
+  ["predicted>gate",   "predicted", "gate",      "h"],
+  ["gate>split",       "gate",      "split",     "h"],
+  ["split>delivered",  "split",     "delivered", "h"],
+  ["inbox>oversized",  "inbox",     "oversized", "drop"],
+  ["parsed>failed",    "parsed",    "failed",    "drop"],
+  ["oversized>failed", "oversized", "failed",    "h"],
+  ["failed>manual",    "failed",    "manual",    "h"],
+  ["manual>split",     "manual",    "split",     "join"],
+];
+
+// Flow poll interval. Counts are tweened over roughly this long, so the two
+// must stay in step: a tween longer than the poll never reaches its target.
+const POLL_FLOW_MS = 4000;
+
+// events[0].stage — written by EventLogger in the notebooks — tells us exactly
+// where the pipeline is, so only that segment animates. Before this, every
+// connector lit up whenever any job ran, which said nothing at all.
+// 'dashboard' is deliberately absent: a human action is not a pipeline phase.
+const STAGE_SEGMENTS = {
+  parse:        ["inbox>parsed"],
+  split:        ["parsed>predicted"],
+  check_export: ["predicted>gate"],
+  pdf_split:    ["gate>split", "manual>split"],   // manual files are split too
+  sftp_upload:  ["split>delivered"],
+};
+// Lane drops are not tied to a phase: they light only on the polls where their
+// own count actually grows, otherwise we are back to "everything blinks".
+const GROWTH_SEGMENTS = {
+  "inbox>oversized": "n_oversized",
+  "parsed>failed":   "n_failed_parse",
+};
+
+// ── Funnel DOM: built ONCE ──────────────────────────────────────────────────
+// Regenerating innerHTML every poll would restart every animation and throw
+// away the tween state, so the numbers could never climb smoothly.
+function buildFunnelDom() {
+  const el = $("funnel");
+  if (el.dataset.built) return;
+  const node = (s, cls) =>
+    `<div class="stage ${cls}" id="fn-${s.key}"${s.col ? ` style="grid-column:${s.col}"` : ""}>
+       <div class="bubble"><span class="count">0</span></div>
+       <div class="lbl">${esc(s.lbl)}</div>
+       <div class="note" id="fx-${s.key}"></div>
+     </div>`;
+  el.innerHTML =
+    `<svg class="wires" id="funnel-wires"></svg>
+     <div class="frow main">${MAIN_STAGES.map((s, i) => node(s, `m${i + 1}`)).join("")}</div>
+     <div class="frow lane">${LANE_STAGES.map((s) =>
+        node(s, "lane" + (s.soft ? " soft" : ""))).join("")}</div>`;
+  el.dataset.built = "1";
+}
+
+// ── Connector geometry ──────────────────────────────────────────────────────
+// Paths are measured off the real bubble rects, so the diagram survives a
+// resize and a different font without hand-tuned coordinates.
+let wirePaths = {}, wireTokens = {}, wireWidth = 0;
+
+function bubbleBox(key) {
+  const b = document.querySelector(`#fn-${key} .bubble`).getBoundingClientRect();
+  const host = $("funnel");
+  const d = host.getBoundingClientRect();
+  // #funnel scrolls horizontally and the SVG/tokens are absolute children of
+  // it, so they live in CONTENT space, not viewport space.
+  const x = b.left - d.left + host.scrollLeft;
+  const y = b.top - d.top + host.scrollTop;
+  return { x, y, w: b.width, h: b.height, cx: x + b.width / 2, cy: y + b.height / 2 };
+}
+
+function buildWires() {
+  const host = $("funnel"), svg = $("funnel-wires");
+  svg.setAttribute("width", host.scrollWidth);
+  svg.setAttribute("height", host.scrollHeight);
+  svg.innerHTML = "";
+  wirePaths = {};
+
+  for (const [id, from, to, shape] of WIRES) {
+    const a = bubbleBox(from), b = bubbleBox(to);
+    let d;
+    if (shape === "h") {
+      d = `M ${a.cx + a.w / 2 + 3} ${a.cy} L ${b.cx - b.w / 2 - 3} ${b.cy}`;
+    } else if (shape === "drop") {
+      d = `M ${a.cx} ${a.y + a.h + 3} L ${a.cx} ${b.y - 3}`;
+    } else {
+      const x1 = a.cx + a.w / 2 + 3, y1 = a.cy, x2 = b.cx, y2 = b.y + b.h + 3;
+      d = `M ${x1} ${y1} C ${x1 + 60} ${y1}, ${x2} ${y1}, ${x2} ${y2}`;
+    }
+    wirePaths[id] = d;
+
+    const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    p.setAttribute("d", d);
+    p.setAttribute("class", isLaneWire(id) ? "wire lane" : "wire");
+    svg.appendChild(p);
+  }
+
+  Object.values(wireTokens).flat().forEach((el) => el.remove());
+  wireTokens = {};
+  for (const [id] of WIRES) {
+    wireTokens[id] = [0, 1, 2].map((i) => {
+      const el = document.createElement("div");
+      el.className = "flow-token";
+      el.style.offsetPath = `path('${wirePaths[id]}')`;
+      el.style.animationDelay = `${i * 0.5}s`;
+      host.appendChild(el);
+      return el;
+    });
+  }
+  wireWidth = host.clientWidth;
+}
+
+const isLaneWire = (id) =>
+  ["oversized", "failed", "manual"].some((k) => id.includes(k));
+
+// A resize invalidates every rect. Redraw, preserving which segments were live
+// so an active run doesn't visibly stall just because the window moved.
+addEventListener("resize", () => {
+  if (state.tab !== "flow" || !$("funnel").dataset.built) return;
+  const on = {};
+  for (const [id] of WIRES) on[id] = !!(wireTokens[id] || [])[0]?.classList.contains("on");
+  buildWires();
+  for (const [id] of WIRES) if (on[id]) wireTokens[id].forEach((el) => el.classList.add("on"));
+});
+
+// ── Counts that climb instead of jumping ────────────────────────────────────
+// The DB counts really do rise during a run (merge_processing_log commits per
+// chunk); tweening over the poll interval just removes the stair-step.
+const tweens = new Map();
+
+function setCount(key, value, ms) {
+  const el = document.querySelector(`#fn-${key} .count`);
+  if (!el) return;
+  const from = tweens.get(key)?.cur ?? 0;
+  if (from === value) return;
+  const host = $(`fn-${key}`);
+  host.classList.add("bumped");
+  setTimeout(() => host.classList.remove("bumped"), 260);
+
+  const prev = tweens.get(key);
+  if (prev?.raf) cancelAnimationFrame(prev.raf);
+  const t0 = performance.now();
+  const st = { cur: from, raf: 0 };
+  tweens.set(key, st);
+
+  const frame = (now) => {
+    const k = Math.min(1, (now - t0) / ms);
+    st.cur = from + (value - from) * (1 - Math.pow(1 - k, 2));
+    el.textContent = Math.round(st.cur);
+    if (k < 1) st.raf = requestAnimationFrame(frame);
+    else { st.cur = value; el.textContent = value; }
+  };
+  st.raf = requestAnimationFrame(frame);
+}
+
+function resetFunnelTweens() {
+  tweens.forEach((t) => t.raf && cancelAnimationFrame(t.raf));
+  tweens.clear();
+  document.querySelectorAll("#funnel .count").forEach((el) => (el.textContent = "0"));
+  document.querySelectorAll("#funnel .note").forEach((el) => (el.innerHTML = ""));
+}
+
+/** "3 marked · 1 todo" — "" when the bucket is empty entirely.
+ *  The verb differs by node because the work differs: on the lane's two source
+ *  nodes the action is marking a file manual, on Manual it is drawing its
+ *  boundaries. One word for both would hide that. */
+function progressNote(done, todo, verb) {
+  if (!done && !todo) return "";
+  return `<span class="ok">${done} ${verb}</span> · `
+       + (todo ? `<span class="warn">${todo} todo</span>` : "0 todo");
+}
 
 async function loadFlow() {
   if (!state.dayId) return;
   $("flow-day").textContent = state.dayId;
+  buildFunnelDom();
   const res = await jget(`/api/progress?${dayQ()}`);
   if (res.error) return toast(`Progress: ${res.error}`, true);
 
@@ -222,19 +456,15 @@ async function loadFlow() {
     gate: g.n_annotated ?? 0,
     split: n(f.n_sftp_pending) + n(f.n_delivered) + n(f.n_sftp_failed) + n(f.n_deferred),
     delivered: n(f.n_delivered),
+    // Manual lane. `?? 0` is load-bearing: if the app is redeployed before
+    // sql/views.sql (and its PG twin) are applied, SELECT * simply omits these
+    // columns and the bubbles would read NaN. Zeros degrade honestly.
+    oversized: n(f.n_oversized ?? 0),
+    failed: n(f.n_failed_parse ?? 0),
+    manual: n(f.n_manual_total ?? 0),
   };
-  const errs = {
-    inbox: 0,
-    parsed: n(f.n_error),
-    predicted: n(f.n_needs_review),
-    gate: (g.n_sampled ?? 0) - (g.n_annotated ?? 0),
-    split: n(f.n_deferred),
-    delivered: n(f.n_sftp_failed),
-  };
-  const errLbl = {
-    parsed: "errors", predicted: "needs review", gate: "to annotate",
-    split: "deferred", delivered: "failed",
-  };
+
+  setErrorBadge(f.n_delivery_blocked);
 
   const running = (res.active_runs || []).length > 0;
   $("flow-runstate").textContent = running
@@ -242,26 +472,62 @@ async function loadFlow() {
     : "idle — no active job";
   $("poll-dot").classList.toggle("live", running);
 
-  const funnel = $("funnel");
-  funnel.classList.toggle("running", running);
-  funnel.innerHTML = STAGES.map((s, i) => {
-    const bumped = state.lastFunnel && counts[s.key] !== state.lastFunnel[s.key];
-    const flowing = running && i > 0;
-    return `
-      <div class="stage ${bumped ? "bumped" : ""} ${flowing ? "flowing" : ""}">
-        ${i > 0 ? '<span class="flow-token"></span>' : ""}
-        <div class="bubble">${counts[s.key]}</div>
-        <div class="lbl">${s.lbl}</div>
-        <div class="sub">${s.sub}</div>
-        ${errs[s.key] > 0 ? `<div class="errs">⚠ ${errs[s.key]} ${errLbl[s.key] || ""}</div>` : ""}
-      </div>`;
-  }).join("");
-  state.lastFunnel = counts;
+  // ── counts, tweened over the poll so they climb ──────────────────────────
+  const dur = Math.max(400, POLL_FLOW_MS * 0.9);
+  for (const [key, value] of Object.entries(counts)) setCount(key, value, dur);
+
+  // ── one short status line per stage ──────────────────────────────────────
+  const note = (key, html) => { const el = $(`fx-${key}`); if (el) el.innerHTML = html; };
+  const toAnnotate = (g.n_sampled ?? 0) - (g.n_annotated ?? 0);
+  note("parsed", n(f.n_pending) ? `<span class="warn">${n(f.n_pending)} queued</span>` : "");
+  // needs_review: both LLMs failed, delivery is blocked until it is approved or
+  // a GT JSON exists. Not a lane node — those files parsed fine (status='done'),
+  // they are unverified, not broken.
+  note("predicted", n(f.n_needs_review)
+    ? `<span class="warn">⚠ ${n(f.n_needs_review)} needs review</span>` : "");
+  note("gate", g.n_sampled
+    ? `${g.n_annotated}/${g.n_sampled} sampled`
+      + (toAnnotate > 0 ? ` · <span class="warn">${toAnnotate} todo</span>` : "")
+    : "");
+  note("split", n(f.n_deferred) ? `<span class="warn">${n(f.n_deferred)} deferred</span>` : "");
+  note("delivered", n(f.n_sftp_failed)
+    ? `<span class="warn">${n(f.n_sftp_failed)} failed</span>` : "");
+  note("oversized", progressNote(counts.oversized - n(f.n_skipped), n(f.n_skipped), "marked"));
+  note("failed", progressNote(counts.failed - n(f.n_error), n(f.n_error), "marked"));
+  // n_manual_noted, not n_manual_deliverable: the latter also requires
+  // status='manual', and a hand UPDATE of the status (20260801) erases it while
+  // boundary_source='manual' survives.
+  note("manual", progressNote(n(f.n_manual_noted ?? 0),
+                              counts.manual - n(f.n_manual_noted ?? 0), "noted"));
+
+  // ── geometry: only when it can actually be measured ──────────────────────
+  // The panel is display:none while another tab is up, so every rect would be
+  // zero. Draw on the first visible poll and after a real width change.
+  const host = $("funnel");
+  if (host.clientWidth > 0 && (host.clientWidth !== wireWidth || !wirePaths["inbox>parsed"])) {
+    buildWires();
+  }
+
+  // ── which segments move ──────────────────────────────────────────────────
+  const stage = ((res.events || [])[0] || {}).stage || "";
+  const active = new Set(running ? STAGE_SEGMENTS[stage] || [] : []);
+  for (const [seg, key] of Object.entries(GROWTH_SEGMENTS)) {
+    const now = n(f[key] ?? 0), before = state.lastFunnel ? state.lastFunnel[seg] : null;
+    if (before !== null && now > before) active.add(seg);
+  }
+  for (const [id] of WIRES) {
+    (wireTokens[id] || []).forEach((el) => el.classList.toggle("on", active.has(id)));
+  }
+
+  state.lastFunnel = Object.assign({}, counts, {
+    "inbox>oversized": n(f.n_oversized ?? 0),
+    "parsed>failed": n(f.n_failed_parse ?? 0),
+  });
 
   const feed = $("flow-events");
   feed.innerHTML = (res.events || []).map((e) => `
     <div class="event-row ${e.event_type === "error" ? "err" : ""}">
-      <span class="ts">${esc((e.event_ts || "").slice(0, 19))}</span>
+      <span class="ts">${esc(fmtTs(e.event_ts))}</span>
       <span>${esc(e.stage)}</span>
       <span class="etype">${esc(e.event_type)}</span>
       <span class="fname">${esc(e.filename || e.detail || e.error_message || "")}</span>
@@ -313,6 +579,10 @@ async function loadErrors() {
   const res = await jget(`/api/errors?${dayQ()}`);
   if (res.error) return toast(`Errors: ${res.error}`, true);
   const rows = res.stuck || [];
+  // The badge counts only what BLOCKS delivery, which is a subset of the rows
+  // shown here (an sftp 'deferred' is stuck but must not block the retry).
+  setErrorBadge(rows.filter((r) =>
+    ["error", "skipped", "manual"].includes(r.status) && r.boundary_source !== "manual").length);
   if (!rows.length) {
     $("errors-body").innerHTML = "<div class='loading'>✓ Nothing stuck. All documented errors resolved.</div>";
     return;
@@ -338,6 +608,13 @@ async function loadErrors() {
               ? actBtn("retry-parse", r, "↻ parse") : ""}
             ${r.status === "error" && r.error_stage === "pdf_split"
               ? actBtn("retry-split", r, "↻ split") : ""}
+            ${/* A file whose PHYSICAL split failed has no output PDFs, so
+                  retry-sftp would upload nothing and fail again. It needs
+                  sftp_delivery_status back to NULL to re-enter nb_pdf_split's
+                  candidate set — and its boundaries must survive. */""}
+            ${r.sftp_delivery_status === "failed"
+              && /pdf_split failed|no such file/i.test(r.sftp_delivery_error || r.stuck_reason || "")
+              ? actBtn("retry-pdf-split", r, "↻ split PDF") : ""}
             ${["failed", "deferred"].includes(r.sftp_delivery_status)
               ? actBtn("retry-sftp", r, "↻ sftp") : ""}
             ${r.needs_review === "true" || r.needs_review === true
@@ -424,7 +701,7 @@ async function loadSftp() {
           <td>${esc(r.n_pending)}</td>
           <td>${r.n_failed > 0 ? `<b style="color:var(--critical)">⚠ ${esc(r.n_failed)}</b>` : "0"}</td>
           <td>${r.n_deferred > 0 ? `<b style="color:var(--serious)">◔ ${esc(r.n_deferred)}</b>` : "0"}</td>
-          <td class="mono">${esc((r.last_delivered_at || "").slice(0, 19))}</td>
+          <td class="mono">${esc(fmtTs(r.last_delivered_at))}</td>
         </tr>`).join("")}
       </tbody></table></div>` : "<div class='loading'>No delivery activity yet.</div>";
 
@@ -521,7 +798,7 @@ async function showFile(dayId, filename) {
     <h4>Event timeline</h4>
     <div class="event-feed">${(res.events || []).map((e) => `
       <div class="event-row ${e.event_type === "error" ? "err" : ""}">
-        <span class="ts">${esc((e.event_ts || "").slice(0, 19))}</span>
+        <span class="ts">${esc(fmtTs(e.event_ts))}</span>
         <span>${esc(e.stage)}</span>
         <span class="etype">${esc(e.event_type)}</span>
         <span class="fname">${esc(e.detail || e.error_message || (e.old_status ? `${e.old_status} → ${e.new_status}` : ""))}</span>
@@ -592,7 +869,7 @@ function schedulePoll() {
     $("poll-dot").classList.remove("live");
     return;
   }
-  const delay = state.tab === "flow" ? 4000 : 20000;
+  const delay = state.tab === "flow" ? POLL_FLOW_MS : 20000;
   state.pollTimer = setTimeout(async () => {
     try {
       if (state.tab === "flow") await loadFlow();

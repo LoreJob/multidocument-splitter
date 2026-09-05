@@ -1,15 +1,3 @@
-# Ground Truth App — Python dependencies
-
-# Web framework
+# Standalone portfolio demo
 Flask>=3.0.0
 gunicorn>=21.2.0
-
-# Databricks access (auto-auth via service principal inside Databricks Apps).
-# >=0.114 required for the Lakebase postgres API (generate_database_credential).
-databricks-sdk>=0.114.0
-
-# Server-side PDF page rendering (annotate tab)
-pymupdf>=1.24.0
-
-# Lakebase Postgres serving layer (reads + evaluation_results) — src/core/pg.py
-psycopg[binary]>=3.1

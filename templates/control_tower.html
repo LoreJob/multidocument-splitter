@@ -1,245 +1,156 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Control Tower — Multidocument Pipeline</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/control_tower.css') }}" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#05070c">
+  <title>Multidocument Splitter</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/control_tower.css') }}">
 </head>
 <body>
-  <div id="app">
-    <!-- ── Top bar ─────────────────────────────────────────────────────── -->
-    <header id="topbar">
-      <div class="brand">
-        <span class="brand-mark">EssilorLuxottica</span>
-        <span class="brand-sub">Laplace · Multidocument Control Tower</span>
-      </div>
-      <nav id="tabs">
-        <button class="tab active" data-tab="batches">Batches</button>
-        <button class="tab" data-tab="flow">Live Flow</button>
-        <button class="tab" data-tab="gate">Annotation Gate</button>
-        <button class="tab" data-tab="annotate">Annotate</button>
-        <!-- The badge blinks while files still need a human: delivery is
-             blocked until they are split by hand. Filled by setErrorBadge(). -->
-        <button class="tab" data-tab="errors">Errors<span id="tab-errors-badge"
-          class="tab-badge hidden"></span></button>
-        <button class="tab" data-tab="sftp">SFTP</button>
-        <button class="tab" data-tab="review">Review</button>
-        <button class="tab" data-tab="files">Files</button>
+  <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <a class="logo" href="#overview" data-view-link="overview" aria-label="Multidocument Splitter home">
+        <span class="logo-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span class="logo-copy"><strong>Multi<span>split</span></strong><small>Document intelligence</small></span>
+      </a>
+      <nav class="side-nav">
+        <button class="nav-item active" data-view="overview"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"/></svg>Overview</button>
+        <button class="nav-item" data-view="splitter"><svg viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7V3Zm7 1v4h4M4 7v12h1M11 13h4M11 17h4"/></svg>Splitter<span class="nav-badge">Demo</span></button>
+        <button class="nav-item" data-view="pipeline"><svg viewBox="0 0 24 24"><path d="M5 5h4v4H5V5Zm10 10h4v4h-4v-4ZM9 7h4a4 4 0 0 1 4 4v4M7 9v8h8"/></svg>Pipeline</button>
+        <button class="nav-item" data-view="analytics"><svg viewBox="0 0 24 24"><path d="M4 20V10m5 10V4m6 16v-7m5 7V7"/></svg>Analytics</button>
       </nav>
-      <div class="topbar-right">
-        <select id="day-select" title="Batch (day_id)"></select>
-        <span id="poll-dot" class="poll-dot" title="Live polling"></span>
+      <div class="side-bottom">
+        <div class="system-status"><i></i><span><strong>All systems operational</strong><small>Demo environment</small></span></div>
       </div>
-    </header>
+    </aside>
 
-    <!-- ── Panels ──────────────────────────────────────────────────────── -->
-    <main id="main">
-
-      <!-- Batches (home) -->
-      <section id="panel-batches" class="panel active">
-        <div class="panel-head">
-          <h2>Batches</h2>
-          <span class="muted">inbox/{day_id}/ folders and their journey. The uploader creates the folder; everything else runs from here.</span>
+    <main class="content">
+      <header class="topbar">
+        <button class="mobile-menu" id="mobile-menu" aria-label="Open menu"><span></span><span></span><span></span></button>
+        <div><p class="eyebrow" id="page-eyebrow">Workspace</p><h1 id="page-title">Overview</h1></div>
+        <div class="top-actions">
+          <button class="icon-button" aria-label="Notifications"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg><i></i></button>
+          <button class="button secondary" data-go="analytics"><svg viewBox="0 0 24 24"><path d="M12 3v12m0-12 4 4m-4-4L8 7M5 13v6h14v-6"/></svg>Export report</button>
+          <button class="button primary" data-go="splitter"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>New split</button>
         </div>
-        <div id="batch-list" class="batch-list"><div class="loading">Loading…</div></div>
-      </section>
+      </header>
 
-      <!-- Live flow -->
-      <section id="panel-flow" class="panel">
-        <div class="panel-head">
-          <h2>Live Flow — <span id="flow-day" class="mono"></span></h2>
-          <span id="flow-runstate" class="muted"></span>
-        </div>
-        <div id="funnel" class="funnel"></div>
-        <div class="panel-sub">
-          <h3>Latest events</h3>
-          <div id="flow-events" class="event-feed"></div>
-        </div>
-      </section>
-
-      <!-- Annotation gate -->
-      <section id="panel-gate" class="panel">
-        <div class="panel-head">
-          <h2>Annotation Gate — <span id="gate-day" class="mono"></span></h2>
-        </div>
-        <div id="gate-body"></div>
-      </section>
-
-      <!-- Annotate — the batch comes from the topbar selector, not from here -->
-      <section id="panel-annotate" class="panel">
-        <div class="panel-head">
-          <h2>Annotate — <span id="ann-day" class="mono"></span></h2>
-          <span class="muted">Click a page to mark it as the <b>first page of a new document</b>. Page 1 is always a start. The model's prediction is deliberately not shown.</span>
-          <span class="spacer"></span>
-          <a href="/dashboard" class="btn tiny ghost" target="_blank">📊 Dashboard</a>
-        </div>
-
-        <div class="ann-modebar">
-          <div class="seg">
-            <button id="ann-mode-sample" class="seg-btn active">Annotation</button>
-            <button id="ann-mode-manual" class="seg-btn">Manual</button>
+      <section class="view active" id="view-overview" data-title="Overview" data-eyebrow="Workspace">
+        <div class="hero-card">
+          <div class="hero-copy">
+            <span class="hero-pill"><i></i> AI-powered document processing</span>
+            <h2>Turn complex PDF bundles into <span>structured documents.</span></h2>
+            <p>Detect boundaries, validate results and split multi-document packages through one precise workflow.</p>
+            <div class="hero-actions"><button class="button primary large" data-go="splitter">Try the splitter <span>↗</span></button><button class="text-button" data-go="pipeline"><i></i> See how it works</button></div>
           </div>
-          <div id="ann-manual-banner" class="manual-banner hidden">
-            ✋ Manual mode — parse-failed files, rendered from the raw PDF. Boundaries here are <b>not scored</b> and make the file deliverable.
+          <div class="hero-visual" aria-hidden="true">
+            <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+            <div class="document-stack"><div class="doc-card back"><b></b><i></i><i></i><i></i></div><div class="doc-card mid"><b></b><i></i><i></i><i></i></div><div class="doc-card front"><span>PDF</span><b></b><i></i><i></i><i></i><em>24 pages</em></div></div>
+            <div class="split-beam"><i></i><span></span></div>
+            <div class="mini-output output-one"><span>01</span><div><b>Invoice</b><small>8 pages</small></div><i>✓</i></div>
+            <div class="mini-output output-two"><span>02</span><div><b>Packing list</b><small>6 pages</small></div><i>✓</i></div>
+            <div class="mini-output output-three"><span>03</span><div><b>Customs form</b><small>10 pages</small></div><i>✓</i></div>
           </div>
         </div>
+        <div class="section-heading"><div><p class="eyebrow">Performance</p><h2>At a glance</h2></div><span class="period"><i></i> Last 30 days</span></div>
+        <div class="metric-row">
+          <article class="metric-card"><div class="metric-icon blue"><svg viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7V3Zm7 1v4h4"/></svg></div><div><span>Documents processed</span><strong>12,486</strong><small class="up">↗ 18.2% <em>vs last month</em></small></div><svg class="spark" viewBox="0 0 120 38"><path d="M2 32c15-2 18-14 30-12s16 9 28 1 15-15 27-9 16-3 31-9"/></svg></article>
+          <article class="metric-card"><div class="metric-icon cyan"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></div><div><span>Split accuracy</span><strong>84.3%</strong><small class="up">↗ 1.8% <em>vs last month</em></small></div><div class="ring"><span>84</span></div></article>
+          <article class="metric-card"><div class="metric-icon violet"><svg viewBox="0 0 24 24"><path d="M4 18h16M7 14l3-4 3 2 4-7"/></svg></div><div><span>Time saved</span><strong>284h</strong><small class="up">↗ 32h <em>this month</em></small></div><div class="metric-decoration"><i></i><i></i><i></i><i></i><i></i></div></article>
+          <article class="metric-card"><div class="metric-icon navy"><svg viewBox="0 0 24 24"><path d="M12 8v4l3 2M21 12a9 9 0 1 1-9-9"/></svg></div><div><span>Avg. processing</span><strong>1.4s</strong><small class="down">↓ 0.3s <em>faster</em></small></div><div class="speed-lines"><i></i><i></i><i></i></div></article>
+        </div>
+        <div class="overview-grid">
+          <article class="panel-card activity-card">
+            <div class="card-head"><div><p class="eyebrow">Live activity</p><h3>Recent processing</h3></div><button class="link-button" data-go="pipeline">View pipeline <span>↗</span></button></div>
+            <div class="activity-list">
+              <div class="activity-row"><span class="file-type">PDF</span><div class="activity-name"><strong>Logistics_batch_0842.pdf</strong><small>28 pages · 4 documents detected</small></div><span class="status success"><i></i> Completed</span><time>12 sec ago</time></div>
+              <div class="activity-row"><span class="file-type">PDF</span><div class="activity-name"><strong>Shipping_documents_18.pdf</strong><small>17 pages · Processing boundaries</small></div><span class="status processing"><i></i> Processing</span><time>Now</time></div>
+              <div class="activity-row"><span class="file-type">PDF</span><div class="activity-name"><strong>Invoices_Q3_bundle.pdf</strong><small>42 pages · 7 documents detected</small></div><span class="status success"><i></i> Completed</span><time>4 min ago</time></div>
+              <div class="activity-row"><span class="file-type">PDF</span><div class="activity-name"><strong>Customs_export_2209.pdf</strong><small>12 pages · Manual review requested</small></div><span class="status review"><i></i> Review</span><time>11 min ago</time></div>
+            </div>
+          </article>
+          <article class="panel-card distribution-card"><div class="card-head"><div><p class="eyebrow">Classification</p><h3>Document mix</h3></div><button class="icon-button small">•••</button></div><div class="donut-wrap"><div class="donut"><div><strong>12.4k</strong><span>Total</span></div></div></div><div class="legend"><span><i class="l1"></i>Invoices <b>42%</b></span><span><i class="l2"></i>Shipping <b>28%</b></span><span><i class="l3"></i>Customs <b>18%</b></span><span><i class="l4"></i>Other <b>12%</b></span></div></article>
+        </div>
+      </section>
 
-        <div id="ann-nobatch" class="loading hidden">No batch selected.</div>
-
-        <div id="ann-body" class="ann-body">
-          <aside class="ann-side">
-            <div class="progress-wrap">
-              <div class="progress-row">
-                <span id="ann-n-pending">0</span> pending /
-                <span id="ann-n-done">0</span> done
-              </div>
-              <div class="progress-bar"><div id="ann-progress-fill"></div></div>
+      <section class="view" id="view-splitter" data-title="Document Splitter" data-eyebrow="Interactive demo">
+        <div class="view-intro"><div><h2>Define document boundaries</h2><p>Select first page of every document. Page 1 always starts a document.</p></div><span class="demo-label"><i></i> Interactive demo</span></div>
+        <div class="splitter-layout">
+          <aside class="splitter-side panel-card">
+            <div class="upload-block">
+              <div class="upload-block-head"><span>Upload PDF</span><b class="upload-offline">UNAVAILABLE</b></div>
+              <div class="upload-zone upload-disabled" id="upload-zone"><input type="file" id="pdf-input" accept="application/pdf" hidden disabled><div class="upload-icon"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 14v5h14v-5"/></svg></div><strong>Demo files only</strong><span>External files cannot be loaded</span><button type="button" disabled>Choose PDF</button></div>
+              <p class="upload-unavailable"><i></i> IMPOSSIBLE TO UPLOAD</p>
             </div>
-            <div class="wl-section">
-              <div class="wl-header">PENDING</div>
-              <ul id="ann-pending" class="wl-list"></ul>
-            </div>
-            <div class="wl-section">
-              <div class="wl-header">COMPLETED</div>
-              <ul id="ann-completed" class="wl-list muted"></ul>
-            </div>
+            <div class="side-divider"><span>DEMO FILE</span></div>
+            <button class="demo-file active" id="demo-file"><span class="pdf-icon">PDF</span><span><strong id="split-file-name">multidocument_demo_bundle.pdf</strong><small id="split-file-meta">75 pages · 5 source PDFs</small></span><i>✓</i></button>
+            <div class="split-summary"><div class="summary-title"><span>Split summary</span><b id="document-total">5 documents</b></div><div id="split-list"></div></div>
           </aside>
-
-          <div class="ann-main">
-            <div class="ann-toolbar">
-              <div class="file-info">
-                <span id="ann-file">Select a file to begin</span>
-                <span id="ann-pagecount" class="badge"></span>
-              </div>
-              <span class="spacer"></span>
-              <label class="switch">
-                <input type="checkbox" id="ann-multidoc" />
-                <span>Multi-document</span>
-              </label>
-              <span id="ann-doccount" class="badge accent">1 document</span>
-              <button id="ann-reset" class="btn ghost tiny" disabled>Reset</button>
-              <button id="ann-save" class="btn primary" disabled>Save &amp; Evaluate</button>
-            </div>
-            <div id="ann-empty" class="empty">
-              <p>Pick a PDF from the left.</p>
-            </div>
-            <div id="ann-pages"></div>
+          <div class="splitter-work panel-card">
+            <div class="workspace-toolbar"><div><strong id="workspace-name">multidocument_demo_bundle.pdf</strong><span><i></i> 75 real preview pages loaded</span></div><div class="zoom-controls"><button id="zoom-out">−</button><span id="zoom-value">100%</span><button id="zoom-in">+</button></div><div class="workspace-actions"><button class="button secondary" id="reset-boundaries">Reset</button><button class="button primary" id="confirm-split">Confirm &amp; split <span>↗</span></button></div></div>
+            <div class="boundary-hint"><span><i></i> Document start</span><p>Click any page to add or remove a boundary</p></div>
+            <div class="page-grid" id="page-grid"></div>
           </div>
         </div>
       </section>
 
-      <!-- Errors -->
-      <section id="panel-errors" class="panel">
-        <div class="panel-head">
-          <h2>Errors &amp; stuck files</h2>
-          <span class="muted">Every failure is documented — nothing is silent. Requeue from here.</span>
-        </div>
-        <div id="errors-body"></div>
-      </section>
-
-      <!-- SFTP -->
-      <section id="panel-sftp" class="panel">
-        <div class="panel-head">
-          <h2>SFTP delivery</h2>
-        </div>
-        <div id="sftp-body"></div>
-      </section>
-
-      <!-- Review -->
-      <section id="panel-review" class="panel">
-        <div class="panel-head">
-          <h2>Needs review</h2>
-          <span class="muted">Both LLMs failed on these packages — they would be delivered UNSPLIT. Approve or requeue.</span>
-        </div>
-        <div id="review-body"></div>
-      </section>
-
-      <!-- Files -->
-      <section id="panel-files" class="panel">
-        <div class="panel-head">
-          <h2>Files</h2>
-          <div class="filter-row">
-            <input id="file-q" type="search" placeholder="Search filename / folder…" />
-            <select id="file-status">
-              <option value="">any status</option>
-              <option>pending</option><option>parsing</option><option>parsed</option>
-              <option>done</option><option>error</option><option>skipped</option>
-              <option>manual</option><option>delivered</option><option>failed</option>
-              <option>deferred</option>
-            </select>
-            <button id="file-search" class="btn">Search</button>
+      <section class="view" id="view-pipeline" data-title="Processing Pipeline" data-eyebrow="Workflow simulation">
+        <div class="view-intro"><div><h2>From upload to structured output</h2><p>Each bundle moves through six deterministic steps. Start simulation to watch one run.</p></div><button class="button primary large" id="run-pipeline"><span class="play">▶</span> Start simulation</button></div>
+        <article class="pipeline-card panel-card">
+          <div class="pipeline-top"><span id="run-id">RUN #MS-2048</span><span class="status ready" id="pipeline-status"><i></i> Ready</span><time id="pipeline-time">Estimated time 6 sec</time></div><div class="pipeline-progress"><i id="pipeline-progress-fill"></i></div>
+          <div class="pipeline-steps" id="pipeline-steps">
+            <div class="pipeline-step" data-step="0"><span class="step-icon"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4 4 4M5 14v5h14v-5"/></svg></span><b>Upload</b><small>Receive bundle</small><em>01</em></div><div class="pipeline-connector"><i></i></div>
+            <div class="pipeline-step" data-step="1"><span class="step-icon"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4V5Zm4 4h8M8 13h5"/></svg></span><b>Parse</b><small>Extract pages</small><em>02</em></div><div class="pipeline-connector"><i></i></div>
+            <div class="pipeline-step" data-step="2"><span class="step-icon"><svg viewBox="0 0 24 24"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M6 6l2 2m8 8 2 2m0-12-2 2M8 16l-2 2M9 9h6v6H9V9Z"/></svg></span><b>Detect</b><small>Find boundaries</small><em>03</em></div><div class="pipeline-connector"><i></i></div>
+            <div class="pipeline-step" data-step="3"><span class="step-icon"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span><b>Validate</b><small>Confidence check</small><em>04</em></div><div class="pipeline-connector"><i></i></div>
+            <div class="pipeline-step" data-step="4"><span class="step-icon"><svg viewBox="0 0 24 24"><path d="M8 3v18m8-18v18M4 8h4m8 0h4M4 16h4m8 0h4"/></svg></span><b>Split</b><small>Create documents</small><em>05</em></div><div class="pipeline-connector"><i></i></div>
+            <div class="pipeline-step export-step" data-step="5"><span class="step-icon"><svg viewBox="0 0 24 24"><path d="M8 10V8a4 4 0 0 1 8 0v2M6 10h12v10H6V10Z"/></svg></span><b>Export</b><small>Disabled in demo</small><em>06</em></div>
           </div>
+        </article>
+        <div class="pipeline-bottom">
+          <article class="panel-card event-panel"><div class="card-head"><div><p class="eyebrow">Execution log</p><h3>Step events</h3></div><span class="live-pill"><i></i> Live</span></div><div class="event-terminal" id="event-terminal"><div><time>00:00.000</time><span>Pipeline ready. Waiting to start simulation.</span></div></div></article>
+          <article class="panel-card output-panel"><div class="card-head"><div><p class="eyebrow">Output</p><h3>Generated documents</h3></div><span class="export-locked"><i></i> EXPORT DISABLED</span></div><div class="output-empty" id="output-empty"><div><svg viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7V3Zm7 1v4h4"/></svg></div><strong>No output yet</strong><span>Run pipeline to generate split documents.</span></div><div class="generated-files hidden" id="generated-files">
+            <div class="locked-output"><span>01</span><p><b>lorem_ipsum_english_1.pdf</b><small>Pages 1–15 · 44 KB</small></p><i>⌁</i></div>
+            <div class="locked-output"><span>02</span><p><b>lorem_ipsum_english_2.pdf</b><small>Pages 16–30 · 44 KB</small></p><i>⌁</i></div>
+            <div class="locked-output"><span>03</span><p><b>lorem_ipsum_english_3.pdf</b><small>Pages 31–45 · 44 KB</small></p><i>⌁</i></div>
+            <div class="locked-output"><span>04</span><p><b>lorem_ipsum_english_4.pdf</b><small>Pages 46–60 · 44 KB</small></p><i>⌁</i></div>
+            <div class="locked-output"><span>05</span><p><b>lorem_ipsum_english_5.pdf</b><small>Pages 61–75 · 44 KB</small></p><i>⌁</i></div>
+          </div></article>
         </div>
-        <div id="files-body"></div>
-        <div id="file-detail" class="file-detail hidden"></div>
+      </section>
+
+      <section class="view" id="view-analytics" data-title="Analytics" data-eyebrow="Model performance">
+        <div class="view-intro"><div><h2>Quality at every boundary</h2><p>Demo metrics showing model accuracy, throughput and document distribution.</p></div><div class="date-filter"><button class="active">30 days</button><button>90 days</button><button>12 months</button></div></div>
+        <div class="analytics-metrics"><article><span>Precision</span><strong>86.2%</strong><small>+1.2% this period</small><div class="mini-bar"><i style="width:86.2%"></i></div></article><article><span>Recall</span><strong>82.5%</strong><small>+0.8% this period</small><div class="mini-bar"><i style="width:82.5%"></i></div></article><article><span>F1 score</span><strong>84.3%</strong><small>+1.0% this period</small><div class="mini-bar"><i style="width:84.3%"></i></div></article><article><span>Exact match</span><strong>80.9%</strong><small>1,012 of 1,251 bundles</small><div class="mini-bar"><i style="width:80.9%"></i></div></article></div>
+        <div class="analytics-grid">
+          <article class="panel-card chart-card wide"><div class="card-head"><div><p class="eyebrow">Quality trend</p><h3>Boundary accuracy</h3></div><div class="chart-key"><span><i></i>Precision</span><span><i></i>Recall</span></div></div><div class="line-chart"><div class="y-labels"><span>90%</span><span>85%</span><span>80%</span><span>75%</span></div><div class="chart-stage"><i></i><i></i><i></i><i></i><svg viewBox="0 0 720 220" preserveAspectRatio="none"><defs><linearGradient id="area" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2878ff" stop-opacity=".28"/><stop offset="1" stop-color="#2878ff" stop-opacity="0"/></linearGradient></defs><path class="area" d="M0 180 C70 150 100 160 150 125 S240 130 300 92 S390 110 450 62 S540 80 590 45 S670 55 720 26 V220 H0Z"/><path class="line-primary" d="M0 180 C70 150 100 160 150 125 S240 130 300 92 S390 110 450 62 S540 80 590 45 S670 55 720 26"/><path class="line-secondary" d="M0 195 C80 175 105 182 160 150 S235 156 310 120 S400 125 460 95 S550 100 605 70 S680 75 720 52"/></svg><div class="x-labels"><span>Aug 07</span><span>Aug 12</span><span>Aug 17</span><span>Aug 22</span><span>Aug 27</span><span>Sep 05</span></div></div></div></article>
+          <article class="panel-card chart-card"><div class="card-head"><div><p class="eyebrow">Confidence</p><h3>Prediction quality</h3></div></div><div class="confidence"><div class="confidence-ring"><div><strong>84.7</strong><span>avg. score</span></div></div><ul><li><i class="high"></i><span>High confidence</span><b>68%</b></li><li><i class="medium"></i><span>Needs review</span><b>23%</b></li><li><i class="low"></i><span>Manual split</span><b>9%</b></li></ul></div></article>
+          <article class="panel-card chart-card wide"><div class="card-head"><div><p class="eyebrow">Volume</p><h3>Documents processed</h3></div><strong class="chart-total">12,486 <small>total</small></strong></div><div class="bar-chart"><div style="--h:48%"><i></i><span>Mon</span></div><div style="--h:65%"><i></i><span>Tue</span></div><div style="--h:82%"><i></i><span>Wed</span></div><div style="--h:58%"><i></i><span>Thu</span></div><div style="--h:91%"><i></i><span>Fri</span></div><div style="--h:73%"><i></i><span>Sat</span></div><div style="--h:55%"><i></i><span>Sun</span></div></div></article>
+          <article class="panel-card chart-card"><div class="card-head"><div><p class="eyebrow">Errors</p><h3>Review reasons</h3></div></div><div class="reason-list"><div><span>Low boundary confidence</span><b>42</b><i><em style="width:74%"></em></i></div><div><span>Unsupported layout</span><b>18</b><i><em style="width:43%"></em></i></div><div><span>Image quality</span><b>11</b><i><em style="width:28%"></em></i></div><div><span>Encrypted PDF</span><b>4</b><i><em style="width:12%"></em></i></div></div></article>
+        </div>
+        <p class="mock-note">All analytics shown are fictional and used for product demonstration only.</p>
       </section>
     </main>
-
-    <!-- ── Dialogs ─────────────────────────────────────────────────────── -->
-    <dialog id="dlg-ingest">
-      <form method="dialog" class="dlg-form">
-        <h3>Run ingest — <span id="dlg-ingest-day" class="mono"></span></h3>
-        <p class="muted">Parse → split predictions → annotation sample. The batch then waits at the annotation gate.</p>
-        <label>Annotation sample %
-          <input id="dlg-sample-pct" type="number" min="1" max="100" step="1" value="10" />
-        </label>
-        <div class="dlg-actions">
-          <button value="cancel" class="btn ghost">Cancel</button>
-          <button id="dlg-ingest-go" value="ok" class="btn primary">Launch job_ingest</button>
-        </div>
-      </form>
-    </dialog>
-
-    <dialog id="dlg-deliver">
-      <form method="dialog" class="dlg-form">
-        <h3>Split &amp; upload — <span id="dlg-deliver-day" class="mono"></span></h3>
-        <p class="muted">Ground truth overrides predictions where annotated. Type the SFTP destination for THIS delivery — it is validated on the server before anything uploads.</p>
-        <label>SFTP remote path
-          <input id="dlg-sftp-path" type="text" placeholder="/Laplace/LAPLACE/US/20260714" spellcheck="false" />
-        </label>
-        <div class="dlg-actions">
-          <button value="cancel" class="btn ghost">Cancel</button>
-          <button id="dlg-deliver-go" value="ok" class="btn primary">Launch job_deliver</button>
-        </div>
-      </form>
-    </dialog>
-
-    <dialog id="dlg-redeliver">
-      <form method="dialog" class="dlg-form">
-        <h3>Re-deliver deferred — <span id="dlg-redeliver-day" class="mono"></span></h3>
-        <p class="muted">Files skipped because their remote folder was missing. They reset to pending and upload to the NEW path below.</p>
-        <div id="dlg-redeliver-list" class="deferred-list"></div>
-        <label>New SFTP remote path
-          <input id="dlg-redeliver-path" type="text" placeholder="/Laplace/LAPLACE/US/other-folder" spellcheck="false" />
-        </label>
-        <div class="dlg-actions">
-          <button value="cancel" class="btn ghost">Cancel</button>
-          <button id="dlg-redeliver-go" value="ok" class="btn primary">Re-deliver</button>
-        </div>
-      </form>
-    </dialog>
-
-    <dialog id="dlg-eval">
-      <div class="dlg-form">
-        <div class="eval-head">
-          <h3 id="dlg-eval-title">Saved</h3>
-          <span class="spacer"></span>
-          <button id="dlg-eval-close" class="btn ghost tiny" onclick="document.getElementById('dlg-eval').close()">Close</button>
-        </div>
-        <div id="dlg-eval-body"></div>
-        <div class="dlg-actions">
-          <button id="dlg-eval-next" class="btn primary">Next file →</button>
-        </div>
-      </div>
-    </dialog>
-
-    <div id="toast" class="toast hidden"></div>
   </div>
-
-  <!-- control_tower.js first: it declares state/$/esc/toast/jget/jpost/dayQ,
-       which annotate.js reuses rather than redeclaring. -->
+  <div class="pdf-viewer hidden" id="pdf-viewer" role="dialog" aria-modal="true" aria-labelledby="viewer-title">
+    <header class="viewer-toolbar">
+      <div><p class="eyebrow">Full-page preview</p><strong id="viewer-title">Document page</strong></div>
+      <div class="viewer-actions">
+        <button class="button secondary" id="viewer-boundary"><i></i> Mark document start</button>
+        <button class="viewer-icon-button" id="viewer-browser-fullscreen" aria-label="Enter browser fullscreen"><svg viewBox="0 0 24 24"><path d="M8 3H3v5m13-5h5v5M8 21H3v-5m13 5h5v-5"/></svg></button>
+        <button class="viewer-icon-button" id="viewer-close" aria-label="Close full-page preview"><svg viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </div>
+    </header>
+    <div class="viewer-stage">
+      <button class="viewer-nav viewer-prev" id="viewer-prev" aria-label="Previous page"><svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></button>
+      <div class="viewer-canvas" id="viewer-canvas"><span class="viewer-boundary-badge" id="viewer-boundary-badge"><i></i> Document start</span><img id="viewer-image" alt="" title="Click to mark this page as a document start"></div>
+      <button class="viewer-nav viewer-next" id="viewer-next" aria-label="Next page"><svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+    </div>
+    <footer class="viewer-footer"><span id="viewer-source">Source document</span><strong id="viewer-counter">1 / 75</strong><span>Click page to mark start · ← → navigate · Esc close</span></footer>
+  </div>
+  <div class="toast hidden" id="toast" role="status"></div>
   <script src="{{ url_for('static', filename='js/control_tower.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/annotate.js') }}"></script>
 </body>
 </html>
